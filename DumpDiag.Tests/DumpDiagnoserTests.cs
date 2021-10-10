@@ -90,7 +90,7 @@ namespace DumpDiag.Tests
             string written;
             using (var writer = new StringWriter())
             {
-                await res.WriteToAsync(writer).ConfigureAwait(false);
+                await res.WriteToAsync(writer, 1).ConfigureAwait(false);
 
                 written = writer.ToString();
             }

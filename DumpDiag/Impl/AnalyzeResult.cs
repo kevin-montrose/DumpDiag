@@ -34,7 +34,7 @@ namespace DumpDiag.Impl
         {
             using (var writer = new StringWriter())
             {
-                var task = WriteToAsync(writer);
+                var task = WriteToAsync(writer, 1);
 
                 task.GetAwaiter().GetResult();
 
@@ -42,26 +42,26 @@ namespace DumpDiag.Impl
             }
         }
 
-        internal async ValueTask WriteToAsync(TextWriter writer)
+        internal async ValueTask WriteToAsync(TextWriter writer, int minCount)
         {
             var builder = new StringBuilder();
 
-            await WriteSegmentAsync(writer, "Types", TypeReferenceStats, builder).ConfigureAwait(false);
+            await WriteSegmentAsync(writer, "Types", TypeReferenceStats, minCount, builder).ConfigureAwait(false);
 
             await writer.WriteLineAsync().ConfigureAwait(false);
             await writer.WriteLineAsync().ConfigureAwait(false);
 
-            await WriteSegmentAsync(writer, "Delegates", DelegateReferenceStats, builder).ConfigureAwait(false);
+            await WriteSegmentAsync(writer, "Delegates", DelegateReferenceStats, minCount, builder).ConfigureAwait(false);
 
             await writer.WriteLineAsync().ConfigureAwait(false);
             await writer.WriteLineAsync().ConfigureAwait(false);
 
-            await WriteSegmentAsync(writer, "Strings", StringReferenceStats, builder).ConfigureAwait(false);
+            await WriteSegmentAsync(writer, "Strings", StringReferenceStats, minCount, builder).ConfigureAwait(false);
 
             await writer.WriteLineAsync().ConfigureAwait(false);
             await writer.WriteLineAsync().ConfigureAwait(false);
 
-            await WriteSegmentAsync(writer, "Char[]", CharacterArrayReferenceStats, builder).ConfigureAwait(false);
+            await WriteSegmentAsync(writer, "Char[]", CharacterArrayReferenceStats, minCount, builder).ConfigureAwait(false);
 
             await writer.WriteLineAsync().ConfigureAwait(false);
             await writer.WriteLineAsync().ConfigureAwait(false);
@@ -119,8 +119,16 @@ namespace DumpDiag.Impl
                 }
             }
 
-            static async ValueTask WriteSegmentAsync(TextWriter writer, string header, ImmutableDictionary<string, ReferenceStats> dict, StringBuilder builder)
+            static async ValueTask WriteSegmentAsync(
+                TextWriter writer,
+                string header,
+                ImmutableDictionary<string, ReferenceStats> rawDict, 
+                int minCount,
+                StringBuilder builder
+            )
             {
+                var dict = rawDict.Where(kv => kv.Value.Dead + kv.Value.Live >= minCount).ToImmutableDictionary();
+
                 await writer.WriteLineAsync(header).ConfigureAwait(false);
                 await writer.WriteLineAsync(new string('=', header.Length)).ConfigureAwait(false);
 
