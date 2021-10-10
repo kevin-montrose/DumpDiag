@@ -36,11 +36,14 @@ Only one of `--dump-file` and `--dump-process-id` can be specified.
 
 DumpDiag performs routine analysis of a dump of a .NET process using `dotnet-dump`:
 
- - Counts of live and dead types on the heap
+ - Counts of values on the heap, by type
  - Counts of strings on the heap, by content
  - Counts of char[]s on the heap, by content
+ - Counts deleges on the heap, by backing method
  - All managed thread call stacks
  - Counts of unique stack frames from managed threads
+
+Where relevant total, live, and dead counts are reported.  High % of dead references (especially over time) can indicate inefficient allocation patterns.
 
 Constraints for `dotnet-dump` apply equally to DumpDiag, primarily that dumps must be analyzed on the same OS as they were captured on.
 
