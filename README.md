@@ -10,7 +10,7 @@ DumpDiag assumes [`dotnet-dump`](https://docs.microsoft.com/en-us/dotnet/core/di
 
 ## Options
 
-Run with `dotnet dumpdiag` after installation.
+Run with `dumpdiag` after installation, assuming global installation.
 
 ```
 Usage:
