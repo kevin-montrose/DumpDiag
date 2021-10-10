@@ -10,23 +10,26 @@ namespace DumpDiag.Impl
 {
     internal readonly struct AnalyzeResult
     {
-        internal ImmutableDictionary<string, ReferenceStats> TypeReferenceStats { get; }
+        internal ImmutableDictionary<NameWithSize, ReferenceStats> TypeReferenceStats { get; }
         internal ImmutableDictionary<string, ReferenceStats> StringReferenceStats { get; }
         internal ImmutableDictionary<string, ReferenceStats> DelegateReferenceStats { get; }
         internal ImmutableDictionary<string, ReferenceStats> CharacterArrayReferenceStats { get; }
+        internal ImmutableDictionary<NameWithSize, ReferenceStats> AsyncStateMatchineStats { get; }
         internal ThreadAnalysis ThreadDetails { get; }
 
         internal AnalyzeResult(
-            ImmutableDictionary<string, ReferenceStats> typeReferenceStats,
+            ImmutableDictionary<NameWithSize, ReferenceStats> typeReferenceStats,
             ImmutableDictionary<string, ReferenceStats> stringReferenceStats,
             ImmutableDictionary<string, ReferenceStats> delegateReferenceStats,
             ImmutableDictionary<string, ReferenceStats> characterArrayReferenceStats,
+            ImmutableDictionary<NameWithSize, ReferenceStats> asyncStateMatchineStats,
             ThreadAnalysis threadDetails)
         {
             TypeReferenceStats = typeReferenceStats;
             StringReferenceStats = stringReferenceStats;
             DelegateReferenceStats = delegateReferenceStats;
             CharacterArrayReferenceStats = characterArrayReferenceStats;
+            AsyncStateMatchineStats = asyncStateMatchineStats;
             ThreadDetails = threadDetails;
         }
 
@@ -46,7 +49,7 @@ namespace DumpDiag.Impl
         {
             var builder = new StringBuilder();
 
-            await WriteSegmentAsync(writer, "Types", TypeReferenceStats, minCount, builder).ConfigureAwait(false);
+            await WriteSegmentWithSizeAsync(writer, "Types", TypeReferenceStats, minCount, builder).ConfigureAwait(false);
 
             await writer.WriteLineAsync().ConfigureAwait(false);
             await writer.WriteLineAsync().ConfigureAwait(false);
@@ -62,6 +65,11 @@ namespace DumpDiag.Impl
             await writer.WriteLineAsync().ConfigureAwait(false);
 
             await WriteSegmentAsync(writer, "Char[]", CharacterArrayReferenceStats, minCount, builder).ConfigureAwait(false);
+
+            await writer.WriteLineAsync().ConfigureAwait(false);
+            await writer.WriteLineAsync().ConfigureAwait(false);
+
+            await WriteSegmentWithSizeAsync(writer, "Async State Machines", AsyncStateMatchineStats, minCount, builder).ConfigureAwait(false);
 
             await writer.WriteLineAsync().ConfigureAwait(false);
             await writer.WriteLineAsync().ConfigureAwait(false);
@@ -116,6 +124,69 @@ namespace DumpDiag.Impl
                     await writer.WriteAsync("   ").ConfigureAwait(false);
                     await writer.WriteAsync(kv.Key).ConfigureAwait(false);
                     await writer.WriteLineAsync();
+                }
+            }
+
+            static async ValueTask WriteSegmentWithSizeAsync(
+                TextWriter writer,
+                string header,
+                ImmutableDictionary<NameWithSize, ReferenceStats> rawDict,
+                int minCount,
+                StringBuilder builder
+            )
+            {
+                var dict = rawDict.Where(kv => kv.Value.Dead + kv.Value.Live >= minCount).ToImmutableDictionary();
+
+                await writer.WriteLineAsync(header).ConfigureAwait(false);
+                await writer.WriteLineAsync(new string('=', header.Length)).ConfigureAwait(false);
+
+                var maxSize = rawDict.Keys.Max(x => x.SizeBytes);
+
+                var maxTotal = dict.Select(x => x.Value.Dead + x.Value.Live).Max();
+                var maxDead = dict.Select(x => x.Value.Dead).Max();
+                var maxLive = dict.Select(x => x.Value.Live).Max();
+
+                var maxTotalSize = maxTotal * maxSize;
+                var maxDeadSize = maxDead * maxSize;
+                var maxLiveSize = maxLive * maxSize;
+
+                var totalSize = maxTotal.ToString("N0").Length + $"({maxTotalSize:N0})".Length;
+                totalSize = Math.Max("Total(bytes)".Length, totalSize);
+
+                var deadSize = maxDead.ToString("N0").Length + $"({maxDeadSize:N0})".Length;
+                deadSize = Math.Max("Dead(bytes)".Length, deadSize);
+
+                var liveSize = maxLive.ToString("N0").Length + $"({maxLiveSize:N0})".Length;
+                liveSize = Math.Max("Live(bytes)".Length, liveSize);
+
+                await WritePartAsync(writer, "Total(bytes)", totalSize).ConfigureAwait(false);
+                await writer.WriteAsync("   ").ConfigureAwait(false);
+                await WritePartAsync(writer, "Dead(bytes)", deadSize).ConfigureAwait(false);
+                await writer.WriteAsync("   ").ConfigureAwait(false);
+                await WritePartAsync(writer, "Live(bytes)", liveSize).ConfigureAwait(false);
+                await writer.WriteAsync("   Value").ConfigureAwait(false);
+                await writer.WriteLineAsync().ConfigureAwait(false);
+
+                await writer.WriteLineAsync(new string('-', totalSize + deadSize + liveSize + "Value".Length + 3 * 3)).ConfigureAwait(false);
+
+                var inOrder = dict.OrderByDescending(kv => (kv.Value.Dead + kv.Value.Live) * kv.Key.SizeBytes).ThenByDescending(kv => kv.Value.Dead * kv.Key.SizeBytes).ThenByDescending(kv => kv.Value.Live * kv.Key.SizeBytes);
+                foreach (var kv in inOrder)
+                {
+                    var total = kv.Value.Live + kv.Value.Dead;
+                    var totalBytes = total * kv.Key.SizeBytes;
+                    var liveBytes = kv.Value.Live * kv.Key.SizeBytes;
+                    var deadBytes = kv.Value.Dead * kv.Key.SizeBytes;
+
+                    await WritePartAsync(writer, total.ToString("N0") + $"({totalBytes:N0})", totalSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+                    await WritePartAsync(writer, kv.Value.Dead.ToString("N0") + $"({deadBytes:N0})", deadSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+                    await WritePartAsync(writer, kv.Value.Live.ToString("N0") + $"({liveBytes:N0})", liveSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+
+                    var escaped = Escape(kv.Key.Name, builder);
+                    await writer.WriteAsync(escaped).ConfigureAwait(false);
+                    await writer.WriteLineAsync().ConfigureAwait(false);
                 }
             }
 
@@ -231,8 +302,6 @@ namespace DumpDiag.Impl
                 {
                     switch (c)
                     {
-                        case '\"':
-                        case '\\':
                         case '\0':
                         case '\a':
                         case '\b':

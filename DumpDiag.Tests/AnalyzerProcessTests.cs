@@ -510,6 +510,43 @@ namespace DumpDiag.Tests
             GC.KeepAlive(charArr);
         }
 
+        [Theory]
+        [MemberData(nameof(ArrayPoolParameters))]
+        public async Task LoadAsyncStateMachinesAsync(ArrayPool<char> pool)
+        {
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+
+            await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
+            {
+                var shouldMatch = new List<AsyncStateMachineDetails>();
+
+                await foreach(var line in analyze.SendCommand(Command.CreateCommand("dumpasync -completed")).ConfigureAwait(false))
+                {
+                    var entryStr = line.ToString();
+                    line.Dispose();
+
+                    var match = Regex.Match(entryStr, @"^ (?<addr> [0-9a-f]+) \s+ (?<mt> [0-9a-f]+) \s+ (?<size> \d+) \s+ (?<status> \S+) \s+ (?<state> \-?\d+) \s+ (?<description> .*?) $", RegexOptions.IgnoreCase | RegexOptions.IgnorePatternWhitespace);
+                    if (match.Success)
+                    {
+                        var addr = long.Parse(match.Groups["addr"].Value, NumberStyles.HexNumber);
+                        var mt = long.Parse(match.Groups["mt"].Value, NumberStyles.HexNumber);
+                        var size = int.Parse(match.Groups["size"].Value);
+                        var desc = match.Groups["description"].Value;
+
+                        shouldMatch.Add(new AsyncStateMachineDetails(addr, mt, size, desc));
+                    }
+                }
+
+                var actual = new List<AsyncStateMachineDetails>();
+                await foreach(var entry in analyze.LoadAsyncStateMachinesAsync().ConfigureAwait(false))
+                {
+                    actual.Add(entry);
+                }
+
+                Assert.Equal(shouldMatch, actual);
+            }
+        }
+
         private static async ValueTask<ImmutableDictionary<string, ImmutableHashSet<long>>> LoadTypeDetailsAsync(AnalyzerProcess analyze)
         {
             var ret = ImmutableDictionary.CreateBuilder<string, ImmutableHashSet<long>>();

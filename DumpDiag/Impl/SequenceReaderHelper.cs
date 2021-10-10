@@ -593,7 +593,6 @@ namespace DumpDiag.Impl
         {
             // pattern is: ^ Name: \s+ (?<name> .*?) $
 
-
             var reader = new SequenceReader<char>(seq);
 
             // handle Name:
@@ -613,6 +612,90 @@ namespace DumpDiag.Impl
 
             // read actual name
             name = reader.UnreadSequence.AsString(arrayPool);
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseAsyncStateMachineDetails(ReadOnlySequence<char> seq, ArrayPool<char> arrayPool, out AsyncStateMachineDetails details)
+        {
+            // pattern is: ^ (?<addr> [0-9a-f]+) \s+ (?<mt> [0-9a-f]+) \s+ (?<size> \d+) \s+ (?<status> \S+) \s+ (?<state> \-?\d+) \s+ (?<description> .*?) $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // parse addr
+            if(!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ' '))
+            {
+                details = default;
+                return false;
+            }
+
+            if(!addrStr.TryParseHexLong(out var addr))
+            {
+                details = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // parse mt
+            if (!reader.TryReadTo(out ReadOnlySequence<char> mtStr, ' '))
+            {
+                details = default;
+                return false;
+            }
+
+            if (!mtStr.TryParseHexLong(out var mt))
+            {
+                details = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // parse size
+            if (!reader.TryReadTo(out ReadOnlySequence<char> sizeStr, ' '))
+            {
+                details = default;
+                return false;
+            }
+
+            if (!sizeStr.TryParseDecimalInt(out var size))
+            {
+                details = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip status
+            if(!reader.TryReadTo(out ReadOnlySequence<char> statusStr, ' '))
+            {
+                details = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // validate state
+            if (!reader.TryReadTo(out ReadOnlySequence<char> stateStr, ' '))
+            {
+                details = default;
+                return false;
+            }
+
+            if (!stateStr.TryParseDecimalInt(out _))
+            {
+                details = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read description
+            var descStr = reader.UnreadSequence;
+            var descStrStr = descStr.AsString(arrayPool);
+
+            details = new AsyncStateMachineDetails(addr, mt, size, descStrStr);
             return true;
         }
     }

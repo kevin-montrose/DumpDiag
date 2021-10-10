@@ -731,6 +731,30 @@ namespace DumpDiag.Impl
             }
         }
 
+        internal IAsyncEnumerable<AsyncStateMachineDetails> LoadAsyncStateMachinesAsync()
+        {
+            var command = SendCommand(Command.CreateCommand("dumpasync -completed"));
+
+            return CompleteAsync(this, command);
+
+            static async IAsyncEnumerable<AsyncStateMachineDetails> CompleteAsync(
+                AnalyzerProcess self,
+                BoundedSharedChannel<OwnedSequence<char>>.AsyncEnumerable commandRes
+            )
+            {
+                await foreach (var line in commandRes.ConfigureAwait(false))
+                {
+                    using var lineRef = line;
+
+                    var seq = lineRef.GetSequence();
+                    if (SequenceReaderHelper.TryParseAsyncStateMachineDetails(seq, self.arrayPool, out var details))
+                    {
+                        yield return details;
+                    }
+                }
+            }
+        }
+
         /// <summary>
         /// Create a new <see cref="AnalyzerProcess"/> given a path to dotnet-dump and an argument list to pass.
         /// </summary>

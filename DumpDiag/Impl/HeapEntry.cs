@@ -6,7 +6,7 @@ namespace DumpDiag.Impl
     {
         public long Address { get; }
         public long MethodTable { get; }
-        public int Size { get; }
+        public int SizeBytes { get; }
         public bool Live { get; }
         public bool Dead => !Live;
 
@@ -14,20 +14,20 @@ namespace DumpDiag.Impl
         {
             Address = addr;
             MethodTable = mt;
-            Size = size;
+            SizeBytes = size;
             Live = l;
         }
 
         public override string ToString()
-        => $"{Address:X2} {MethodTable:X2} {Size:N0} {(Live ? "live" : "dead")}";
+        => $"{Address:X2} {MethodTable:X2} {SizeBytes:N0} {(Live ? "live" : "dead")}";
 
         public bool Equals(HeapEntry other)
-        => other.Address == Address && other.MethodTable == MethodTable && other.Size == Size && other.Live == Live && other.Dead == Dead;
+        => other.Address == Address && other.MethodTable == MethodTable && other.SizeBytes == SizeBytes && other.Live == Live && other.Dead == Dead;
 
         public override bool Equals(object obj)
         => obj is HeapEntry other && Equals(other);
 
         public override int GetHashCode()
-        => HashCode.Combine(Address, MethodTable, Size, Live, Dead);
+        => HashCode.Combine(Address, MethodTable, SizeBytes, Live, Dead);
     }
 }

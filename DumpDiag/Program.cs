@@ -359,6 +359,11 @@ namespace DumpDiag
                     parts.Add($"type details: {progress.PercentTypeDetails}%");
                 }
 
+                if (progress.PercentAsyncDetails > 0 && progress.PercentAsyncDetails < 100)
+                {
+                    parts.Add($"async details: {progress.PercentAsyncDetails}%");
+                }
+
                 if (parts.Count == 0)
                 {
                     return;

@@ -21,7 +21,8 @@ namespace DumpDiag.Impl
             CharacterArrays,
             DeterminingDelegates,
             DelegateDetails,
-            Strings
+            Strings,
+            AsyncDetails
         }
 
         private readonly AnalyzerProcess[] procs;
@@ -39,6 +40,7 @@ namespace DumpDiag.Impl
 
         private ImmutableArray<ImmutableList<HeapEntry>> liveHeapEntriesByProc;
         private ImmutableArray<ImmutableList<HeapEntry>> deadHeapEntriesByProc;
+        private ImmutableList<AsyncStateMachineDetails> asyncDetails;
 
         private DumpDiagnoser(int numProcs, IProgress<DumpDiagnoserProgress> progress)
         {
@@ -92,6 +94,7 @@ namespace DumpDiag.Impl
                     prog = prog.WithThreadCount(CalcPercent(progressCurrent, progressMax, ProgressKind.ThreadCount));
                     prog = prog.WithThreadDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.ThreadDetails));
                     prog = prog.WithTypeDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.TypeDetails));
+                    prog = prog.WithAsyncDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.AsyncDetails));
 
                     progress?.Report(prog);
                 }
@@ -198,7 +201,7 @@ namespace DumpDiag.Impl
         internal async ValueTask<ImmutableDictionary<string, ReferenceStats>> LoadStringCountsAsync()
         {
             SetProgressLimit(ProgressKind.Strings, liveHeapEntries.Count + deadHeapEntries.Count);
-            
+
             // load string counts in parallel
             var stringCountTasks = new Task[procs.Length];
             var stringCountsMutable = new ConcurrentDictionary<string, ReferenceStats>();
@@ -641,7 +644,7 @@ namespace DumpDiag.Impl
             foreach (var threadIndex in threadIndexes)
             {
                 self.MadeProgress(ProgressKind.ThreadDetails, 1);
-                
+
                 var stack = await proc.GetStackTraceForThreadAsync(threadIndex).ConfigureAwait(false);
 
                 if (stack.Count == 0)
@@ -658,7 +661,6 @@ namespace DumpDiag.Impl
             }
         }
 
-
         internal async ValueTask<AnalyzeResult> AnalyzeAsync()
         {
             // load string counts in parallel
@@ -667,6 +669,9 @@ namespace DumpDiag.Impl
             // we can do this while the strings tasks (typically the longest one) runs since
             // we don't need an AnalyzerProcess for it
             var typeTotals = GetTypeTotals(liveHeapEntries, deadHeapEntries, typeDetails);
+
+            // same for this
+            var asyncTotals = GetAsyncTotals(liveHeapEntries, deadHeapEntries, asyncDetails);
 
             var stringCounts = await stringTask.ConfigureAwait(false);
 
@@ -679,10 +684,10 @@ namespace DumpDiag.Impl
             // load thread details in parallel
             var threadDetails = await LoadThreadDetailsAsync().ConfigureAwait(false);
 
-            return new AnalyzeResult(typeTotals, stringCounts, delegateCounts, charCounts, threadDetails);
+            return new AnalyzeResult(typeTotals, stringCounts, delegateCounts, charCounts, asyncTotals, threadDetails);
 
             // all of this is in memory
-            static ImmutableDictionary<string, ReferenceStats> GetTypeTotals(
+            static ImmutableDictionary<NameWithSize, ReferenceStats> GetTypeTotals(
                 ImmutableList<HeapEntry> liveHeapEntries,
                 ImmutableList<HeapEntry> deadHeapEntries,
                 ImmutableDictionary<string, ImmutableHashSet<long>> typeDetails
@@ -693,7 +698,8 @@ namespace DumpDiag.Impl
                         .SelectMany(kv => kv.Value.Select(mt => (MethodTable: mt, TypeName: kv.Key)))
                         .ToImmutableDictionary(t => t.MethodTable, t => t.TypeName);
 
-                var typeTotals = ImmutableDictionary.CreateBuilder<string, ReferenceStats>();
+                var typeRefTotals = ImmutableDictionary.CreateBuilder<string, ReferenceStats>();
+                var typeByteTotals = ImmutableDictionary.CreateBuilder<string, (long LiveBytes, long DeadBytes)>();
 
                 foreach (var entry in liveHeapEntries)
                 {
@@ -702,12 +708,18 @@ namespace DumpDiag.Impl
                         continue;
                     }
 
-                    if (!typeTotals.TryGetValue(typeName, out var existing))
+                    if (!typeRefTotals.TryGetValue(typeName, out var existing))
                     {
                         existing = new ReferenceStats(0, 0);
                     }
 
-                    typeTotals[typeName] = new ReferenceStats(existing.Live + 1, existing.Dead);
+                    if (!typeByteTotals.TryGetValue(typeName, out var existingSize))
+                    {
+                        existingSize = (0, 0);
+                    }
+
+                    typeRefTotals[typeName] = new ReferenceStats(existing.Live + 1, existing.Dead);
+                    typeByteTotals[typeName] = (LiveBytes: existingSize.LiveBytes + entry.SizeBytes, existingSize.DeadBytes);
                 }
 
                 foreach (var entry in deadHeapEntries)
@@ -717,15 +729,110 @@ namespace DumpDiag.Impl
                         continue;
                     }
 
-                    if (!typeTotals.TryGetValue(typeName, out var existing))
+                    if (!typeRefTotals.TryGetValue(typeName, out var existing))
                     {
                         existing = new ReferenceStats(0, 0);
                     }
 
-                    typeTotals[typeName] = new ReferenceStats(existing.Live, existing.Dead + 1);
+                    if (!typeByteTotals.TryGetValue(typeName, out var existingSize))
+                    {
+                        existingSize = (0, 0);
+                    }
+
+                    typeRefTotals[typeName] = new ReferenceStats(existing.Live, existing.Dead + 1);
+                    typeByteTotals[typeName] = (existingSize.LiveBytes, DeadBytes: existingSize.DeadBytes + entry.SizeBytes);
                 }
 
-                return typeTotals.ToImmutable();
+                // approximate this...
+                // todo: I don't love that this can be off
+
+                var ret =
+                    typeRefTotals
+                        .ToImmutableDictionary(
+                            kv =>
+                            {
+                                var bytes = typeByteTotals[kv.Key];
+                                var total = bytes.DeadBytes + bytes.LiveBytes;
+                                var count = kv.Value.Live + kv.Value.Dead;
+
+                                var avgSize = total / count;
+
+                                return new NameWithSize(kv.Key, (int)avgSize);
+                            },
+                            kv => kv.Value
+                        );
+
+                return ret;
+            }
+
+            // all of this is in memory
+            static ImmutableDictionary<NameWithSize, ReferenceStats> GetAsyncTotals(
+                ImmutableList<HeapEntry> liveHeapEntries,
+                ImmutableList<HeapEntry> deadHeapEntries,
+                ImmutableList<AsyncStateMachineDetails> asyncDetails
+            )
+            {
+                var asyncLookup = asyncDetails.ToImmutableDictionary(d => d.MethodTable, d => new NameWithSize(InferBackingMethodName(d.Description), d.SizeBytes));
+
+                var asyncTotals = ImmutableDictionary.CreateBuilder<NameWithSize, ReferenceStats>();
+
+                foreach (var entry in liveHeapEntries)
+                {
+                    if (!asyncLookup.TryGetValue(entry.MethodTable, out var methodName))
+                    {
+                        continue;
+                    }
+
+                    if (!asyncTotals.TryGetValue(methodName, out var existing))
+                    {
+                        existing = new ReferenceStats(0, 0);
+                    }
+
+                    asyncTotals[methodName] = new ReferenceStats(existing.Live + 1, existing.Dead);
+                }
+
+                foreach (var entry in deadHeapEntries)
+                {
+                    if (!asyncLookup.TryGetValue(entry.MethodTable, out var methodName))
+                    {
+                        continue;
+                    }
+
+                    if (!asyncTotals.TryGetValue(methodName, out var existing))
+                    {
+                        existing = new ReferenceStats(0, 0);
+                    }
+
+                    asyncTotals[methodName] = new ReferenceStats(existing.Live, existing.Dead + 1);
+                }
+
+                return asyncTotals.ToImmutable();
+            }
+
+            static string InferBackingMethodName(string desc)
+            {
+                if (desc.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder"))
+                {
+                    // this is pretty hacky, but close enough probably?
+                    var startIx = desc.LastIndexOf('[');
+                    if (startIx == -1)
+                    {
+                        return desc;
+                    }
+
+                    var endIx = desc.IndexOf(']', startIx + 1);
+                    if (endIx == -1)
+                    {
+                        return desc;
+                    }
+
+                    // with will give the type name (which will include method), followed by a , followed by the module it's defined in
+                    var name = desc[(startIx + 1)..endIx];
+
+                    return name;
+                }
+
+                return desc;
             }
         }
 
@@ -906,19 +1013,44 @@ namespace DumpDiag.Impl
 
         private async ValueTask<Task<StringDetails>> LoadStringDetailsAsync(HeapEntry stringHeapEntry)
         {
-            var stringDetailsTask = 
+            var stringDetailsTask =
                 await PlaceOnProcessAsync(
-                    async proc => 
-                    { 
+                    async proc =>
+                    {
                         var ret = await proc.LoadStringDetailsAsync(stringHeapEntry).ConfigureAwait(false);
 
                         MadeProgress(ProgressKind.LoadingHeap, 1);
-                        return ret; 
+                        return ret;
                     }
                 )
                 .ConfigureAwait(false);
 
             return stringDetailsTask;
+        }
+
+        private async ValueTask<Task<ImmutableList<AsyncStateMachineDetails>>> LoadAsyncDetailsAsync()
+        {
+            SetProgressLimit(ProgressKind.AsyncDetails, 1);
+
+            var asyncDetailsTask =
+                await PlaceOnProcessAsync(
+                    async proc =>
+                    {
+                        var ret = ImmutableList.CreateBuilder<AsyncStateMachineDetails>();
+
+                        await foreach (var entry in proc.LoadAsyncStateMachinesAsync().ConfigureAwait(false))
+                        {
+                            ret.Add(entry);
+                        }
+
+                        MadeProgress(ProgressKind.AsyncDetails, 1);
+
+                        return ret.ToImmutable();
+                    }
+                )
+                .ConfigureAwait(false);
+
+            return asyncDetailsTask;
         }
 
         private async ValueTask LoadNeededStateAsync()
@@ -933,12 +1065,21 @@ namespace DumpDiag.Impl
                 this.typeDetails = typeDetails;
             }
 
+            // load async details
+            var asyncDetailsTask = await LoadAsyncDetailsAsync().ConfigureAwait(false);
+
             // only keep the relevant heap entries in memory, otherwise we're gonna balloon badly
             SetProgressLimit(ProgressKind.LoadingHeap, 3);
-            var maximumRelevantTypes = DetermineMaximumRelevantTypeMethodTables(typeDetails);
+            var relevantTypesDueToName = DetermineMaximumRelevantTypeMethodTables(typeDetails);
+
+            var asyncDetails = await asyncDetailsTask.ConfigureAwait(false);    // need to keep the state machine heap entries around...
+            this.asyncDetails = asyncDetails;
+
+            var maximumRelevantTypes = relevantTypesDueToName.Union(asyncDetails.Select(a => a.MethodTable));
+
             var liveHeapTask = await LoadHeapAsync(LoadHeapMode.Live, maximumRelevantTypes).ConfigureAwait(false);
             var deadHeapTask = await LoadHeapAsync(LoadHeapMode.Dead, maximumRelevantTypes).ConfigureAwait(false);
-            
+
             // string details needs heap, so wait for them...
             await liveHeapTask.ConfigureAwait(false);
             liveHeapEntries = liveHeapTask.Result;
