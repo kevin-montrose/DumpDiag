@@ -21,7 +21,7 @@ namespace DumpDiag.Impl
         public bool Equals(AnalyzerStackFrame other)
         => ChildStackPointer == other.ChildStackPointer && InstructionPointer == other.InstructionPointer && CallSite == other.CallSite;
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         => obj is AnalyzerStackFrame other && Equals(other);
 
         public override int GetHashCode()

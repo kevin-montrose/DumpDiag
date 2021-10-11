@@ -26,7 +26,20 @@ namespace DumpDiag.Impl
 
             internal Command FirstCommand { get; private set; }
             internal Command? SecondCommand { get; private set; }
-            internal BoundedSharedChannel<OwnedSequence<char>> Response { get; private set; }
+
+            private BoundedSharedChannel<OwnedSequence<char>>? _response;
+            internal BoundedSharedChannel<OwnedSequence<char>> Response
+            {
+                get
+                {
+                    if (_response == null)
+                    {
+                        throw new InvalidOperationException("Attempted to use uninitialized Message");
+                    }
+
+                    return _response;
+                }
+            }
 
             [Obsolete("Do not use this directly, it's only provided for internal pooling purposes")]
             public Message() { }
@@ -35,7 +48,7 @@ namespace DumpDiag.Impl
             {
                 FirstCommand = firstCommand;
                 SecondCommand = secondCommand;
-                Response = response;
+                _response = response;
             }
 
             internal static Message Create(Command firstCommand, Command? secondCommand, BoundedSharedChannel<OwnedSequence<char>> response)
@@ -48,6 +61,10 @@ namespace DumpDiag.Impl
 
             public void Dispose()
             {
+                FirstCommand = default;
+                SecondCommand = null;
+                _response = null;
+
                 ObjectPool.Return(this);
             }
         }
@@ -59,7 +76,11 @@ namespace DumpDiag.Impl
         private readonly SemaphoreSlim threadReadySignal;
 
         private readonly SemaphoreSlim messageReadySignal;
-        private Message message;
+        private Message? message;
+
+        private bool disposed;
+
+        private readonly Stream underlying;
 
         private AnalyzerProcess(Process proc, ArrayPool<char> arrayPool)
         {
@@ -70,6 +91,14 @@ namespace DumpDiag.Impl
             thread.Name = $"{nameof(AnalyzerProcess)}.{nameof(ThreadLoop)} for {proc.Id}";
             threadReadySignal = new SemaphoreSlim(0);
             messageReadySignal = new SemaphoreSlim(0);
+
+#if DEBUG
+            underlying = new EchoTextStream(process.StandardOutput.BaseStream, process.StandardOutput.CurrentEncoding);
+#else
+            underlying = process.StandardOutput.BaseStream;
+#endif
+
+            disposed = false;
         }
 
         private ValueTask StartAsync()
@@ -88,13 +117,6 @@ namespace DumpDiag.Impl
         {
             const string EndCommandOutput = "<END_COMMAND_OUTPUT>";
             const string PromptStart = "> ";
-
-            Stream underlying;
-#if DEBUG
-            underlying = new EchoTextStream(process.StandardOutput.BaseStream, process.StandardOutput.CurrentEncoding);
-#else
-            underlying = process.StandardOutput.BaseStream;
-#endif
 
             using var reader = new ProcessStreamReader(arrayPool, underlying, process.StandardOutput.CurrentEncoding, Environment.NewLine);
 
@@ -153,9 +175,18 @@ namespace DumpDiag.Impl
             {
                 var readPrompt = false;
 
+                // DEBUG
+                string? lastLine = null;
+                // END DEBUG
+
                 while (e.MoveNext())
                 {
                     var line = e.Current;
+
+                    // DEBUG
+                    lastLine = line.ToString();
+                    // END DEBUG
+
                     var asSequence = line.GetSequence();
 
                     // skip the prompt line...
@@ -180,18 +211,23 @@ namespace DumpDiag.Impl
 
         public ValueTask DisposeAsync()
         {
+            Debug.Assert(!disposed);
+
             if (thread.ThreadState == ThreadState.Unstarted)
             {
                 // never started or already disposed
+                disposed = true;
                 return default;
             }
             else if (!process.HasExited)
             {
                 // send an exit command and then cleanup
                 var command = SendCommand(Command.CreateCommand("exit"));
+                disposed = true;
                 return CompleteAsync(this, command);
             }
 
+            disposed = true;
             CommonCompleteSync(this);
 
             return default;
@@ -224,12 +260,14 @@ namespace DumpDiag.Impl
 
         internal BoundedSharedChannel<OwnedSequence<char>>.AsyncEnumerable SendCommand(Command command, Command? secondCommand = null)
         {
+            Debug.Assert(!disposed);
+
             var response = BoundedSharedChannel<OwnedSequence<char>>.Create();
 
             var msg = Message.Create(command, secondCommand, response);
 
             var oldMsg = Interlocked.Exchange(ref message, msg);
-            Debug.Assert(oldMsg == null);
+            Debug.Assert(oldMsg == null, $"Old message was: {oldMsg}, new message is {msg}");
             messageReadySignal.Release();
 
             return response.ReadUntilCompletedAsync();
@@ -457,7 +495,7 @@ namespace DumpDiag.Impl
                 int length
             )
             {
-                string ret = null;
+                string? ret = null;
 
                 await foreach (var line in command.ConfigureAwait(false))
                 {
@@ -564,23 +602,28 @@ namespace DumpDiag.Impl
                 BoundedSharedChannel<OwnedSequence<char>>.AsyncEnumerable command
             )
             {
-                string className = null;
+                string? className = null;
                 long? parentEEClass = null;
+
+                var instanceFields = ImmutableList.CreateBuilder<InstanceField>();
 
                 await foreach (var line in command.ConfigureAwait(false))
                 {
                     using var lineRef = line;
 
-                    var seq = className == null || parentEEClass == null ? lineRef.GetSequence() : default;
+                    var seq = lineRef.GetSequence();
 
                     if (className == null && SequenceReaderHelper.TryParseClassName(seq, self.arrayPool, out className))
                     {
                         continue;
                     }
-
-                    if (parentEEClass == null && SequenceReaderHelper.TryParseParentClass(seq, out var parent))
+                    else if (parentEEClass == null && SequenceReaderHelper.TryParseParentClass(seq, out var parent))
                     {
                         parentEEClass = parent;
+                    }
+                    else if (SequenceReaderHelper.TryParseInstanceFieldNoValue(seq, self.arrayPool, out var field))
+                    {
+                        instanceFields.Add(field);
                     }
                 }
 
@@ -594,7 +637,7 @@ namespace DumpDiag.Impl
                     throw new InvalidOperationException("Couldn't determine parent class");
                 }
 
-                return new EEClassDetails(className, parentEEClass.Value);
+                return new EEClassDetails(className, parentEEClass.Value, instanceFields.ToImmutable());
             }
         }
 
@@ -677,6 +720,8 @@ namespace DumpDiag.Impl
                     {
                         if (fetching)
                         {
+                            Debug.WriteLine($"Done fetching: {seq}");
+
                             doneFetching = true;
                             fetching = false;
                         }
@@ -698,36 +743,36 @@ namespace DumpDiag.Impl
             }
         }
 
-        internal ValueTask<string> ReadMethodTableTypeNameAsync(long methodTable)
+        internal ValueTask<TypeDetails> ReadMethodTableTypeDetailsAsync(long methodTable)
         {
             var command = SendCommand(Command.CreateCommandWithAddress("dumpmt", methodTable));
 
             return CompleteAsync(this, command);
 
-            static async ValueTask<string> CompleteAsync(
+            static async ValueTask<TypeDetails> CompleteAsync(
                 AnalyzerProcess self,
                 BoundedSharedChannel<OwnedSequence<char>>.AsyncEnumerable commandRes
             )
             {
-                string ret = null;
+                string? name = null;
 
                 await foreach (var line in commandRes.ConfigureAwait(false))
                 {
                     using var lineRef = line;   // free the line after we parse it
 
                     var seq = lineRef.GetSequence();
-                    if (ret == null && SequenceReaderHelper.TryParseTypeName(seq, self.arrayPool, out var name))
+                    if (name == null && SequenceReaderHelper.TryParseTypeName(seq, self.arrayPool, out var nameParsed))
                     {
-                        ret = name;
+                        name = nameParsed;
                     }
                 }
 
-                if (ret == null)
+                if (name == null)
                 {
                     throw new InvalidOperationException("Couldn't read type name");
                 }
 
-                return ret;
+                return new TypeDetails(name);
             }
         }
 
@@ -755,6 +800,51 @@ namespace DumpDiag.Impl
             }
         }
 
+        internal ValueTask<ObjectInstanceDetails?> LoadObjectInstanceFieldsSpecificsAsync(long objectAddress)
+        {
+            var command = SendCommand(Command.CreateCommandWithAddress("dumpobj", objectAddress));
+
+            return CompleteAsync(this, command);
+
+            static async ValueTask<ObjectInstanceDetails?> CompleteAsync(
+                AnalyzerProcess self,
+                BoundedSharedChannel<OwnedSequence<char>>.AsyncEnumerable commandRes
+            )
+            {
+                long? eeClass = null;
+
+                var fieldDetails = ImmutableList.CreateBuilder<InstanceFieldWithValue>();
+
+                await foreach (var line in commandRes.ConfigureAwait(false))
+                {
+                    using var lineRef = line;
+
+                    var seq = lineRef.GetSequence();
+
+                    if (eeClass == null && SequenceReaderHelper.TryParseEEClass(seq, out var eeClassParsed))
+                    {
+                        eeClass = eeClassParsed;
+                    }
+                    else if (SequenceReaderHelper.TryParseInstanceFieldWithValue(seq, self.arrayPool, out var field))
+                    {
+                        fieldDetails.Add(field);
+                    }
+                }
+
+                if (eeClass == null)
+                {
+                    return null;
+                }
+
+                if (fieldDetails.Count == 0)
+                {
+                    return null;
+                }
+
+                return new ObjectInstanceDetails(eeClass.Value, fieldDetails.ToImmutable());
+            }
+        }
+
         /// <summary>
         /// Create a new <see cref="AnalyzerProcess"/> given a path to dotnet-dump and an argument list to pass.
         /// </summary>
@@ -769,6 +859,12 @@ namespace DumpDiag.Impl
             info.Arguments = $"analyze \"{dumpFile}\"";
 
             var proc = Process.Start(info);
+
+            if (proc == null)
+            {
+                throw new Exception("Could not start AnalyzerProcess, this shouldn't be possible");
+            }
+
             Job.Instance.AssociateProcess(proc);
 
             var ret = new AnalyzerProcess(proc, arrayPool);

@@ -6,7 +6,7 @@ namespace DumpDiag.Impl
 {
     internal static class ReadOnlySequenceExtensions
     {
-        public static bool Equals(this ReadOnlySequence<char> sequence, ReadOnlySpan<char> to, StringComparison comparison)
+        internal static bool Equals(this ReadOnlySequence<char> sequence, ReadOnlySpan<char> to, StringComparison comparison)
         {
             if (sequence.IsSingleSegment)
             {
@@ -44,7 +44,7 @@ namespace DumpDiag.Impl
             return remaining.IsEmpty;
         }
 
-        public static bool StartsWith(this ReadOnlySequence<char> sequence, ReadOnlySpan<char> with, StringComparison comparison)
+        internal static bool StartsWith(this ReadOnlySequence<char> sequence, ReadOnlySpan<char> with, StringComparison comparison)
         {
             if (sequence.IsSingleSegment)
             {
@@ -68,7 +68,7 @@ namespace DumpDiag.Impl
                 }
 
                 var partSpan = part.Span;
-                if(partSpan.Length > remaining.Length)
+                if (partSpan.Length > remaining.Length)
                 {
                     return partSpan.StartsWith(remaining, comparison);
                 }
@@ -76,7 +76,7 @@ namespace DumpDiag.Impl
                 {
                     var remainingToCheck = remaining[0..partSpan.Length];
 
-                    if(!remainingToCheck.Equals(partSpan, comparison))
+                    if (!remainingToCheck.Equals(partSpan, comparison))
                     {
                         return false;
                     }
@@ -88,7 +88,7 @@ namespace DumpDiag.Impl
             return remaining.IsEmpty;
         }
 
-        public static bool TryParseHexLong(this ReadOnlySequence<char> sequence, out long value)
+        internal static bool TryParseHexLong(this ReadOnlySequence<char> sequence, out long value)
         {
             if (sequence.IsSingleSegment)
             {
@@ -97,7 +97,7 @@ namespace DumpDiag.Impl
             }
 
             var len = sequence.Length;
-            if(len > 16)
+            if (len > 16)
             {
                 value = default;
                 return false;
@@ -109,7 +109,7 @@ namespace DumpDiag.Impl
             return long.TryParse(longSpan, NumberStyles.HexNumber, null, out value);
         }
 
-        public static bool TryParseHexInt(this ReadOnlySequence<char> sequence, out int value)
+        internal static bool TryParseHexInt(this ReadOnlySequence<char> sequence, out int value)
         {
             if (sequence.IsSingleSegment)
             {
@@ -130,7 +130,7 @@ namespace DumpDiag.Impl
             return int.TryParse(longSpan, NumberStyles.HexNumber, null, out value);
         }
 
-        public static bool TryParseHexShort(this ReadOnlySequence<char> sequence, out short value)
+        internal static bool TryParseHexShort(this ReadOnlySequence<char> sequence, out short value)
         {
             if (sequence.IsSingleSegment)
             {
@@ -151,7 +151,7 @@ namespace DumpDiag.Impl
             return short.TryParse(longSpan, NumberStyles.HexNumber, null, out value);
         }
 
-        public static bool TryParseDecimalInt(this ReadOnlySequence<char> sequence, out int value)
+        internal static bool TryParseDecimalInt(this ReadOnlySequence<char> sequence, out int value)
         {
             if (sequence.IsSingleSegment)
             {
@@ -172,7 +172,7 @@ namespace DumpDiag.Impl
             return int.TryParse(intSpan, out value);
         }
 
-        public static bool TryParseDecimalLong(this ReadOnlySequence<char> sequence, out long value)
+        internal static bool TryParseDecimalLong(this ReadOnlySequence<char> sequence, out long value)
         {
             if (sequence.IsSingleSegment)
             {
@@ -193,7 +193,7 @@ namespace DumpDiag.Impl
             return long.TryParse(longSpan, out value);
         }
 
-        public static string AsString(this ReadOnlySequence<char> sequence, ArrayPool<char> pool)
+        internal static string AsString(this ReadOnlySequence<char> sequence, ArrayPool<char> pool)
         {
             const int MAX_STRING_STACKALLOC_SIZE = 512;
 
@@ -219,6 +219,37 @@ namespace DumpDiag.Impl
 
             pool.Return(arr);
             return ret;
+        }
+
+        internal static int LastIndexOf(this ReadOnlySequence<char> sequence, char c)
+        {
+            if (sequence.IsSingleSegment)
+            {
+                return sequence.FirstSpan.LastIndexOf(c);
+            }
+
+            var e = sequence.GetEnumerator();
+
+            return LastIndexOfRecurse(ref e, c);
+
+            static int LastIndexOfRecurse(ref ReadOnlySequence<char>.Enumerator e, char c)
+            {
+                // we're at the end...
+                if (!e.MoveNext())
+                {
+                    return -1;
+                }
+
+                var cur = e.Current.Span;
+
+                var indexAhead = LastIndexOfRecurse(ref e, c);
+                if (indexAhead != -1)
+                {
+                    return indexAhead + cur.Length;
+                }
+
+                return cur.LastIndexOf(c);
+            }
         }
     }
 }

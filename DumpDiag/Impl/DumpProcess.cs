@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 
@@ -23,6 +24,12 @@ namespace DumpDiag.Impl
             info.Arguments = $"collect --process-id {targetProcessId} --type Full --output \"{ outputFile}\"";
 
             var proc = Process.Start(info);
+
+            if (proc == null)
+            {
+                throw new Exception("Could not start process, this shouldn't be possible");
+            }
+
             Job.Instance.AssociateProcess(proc);
 
             var readToEndTask = Task.Run(() => proc.StandardOutput.ReadToEndAsync());

@@ -24,7 +24,7 @@ namespace DumpDiag.Impl
         public bool Equals(HeapEntry other)
         => other.Address == Address && other.MethodTable == MethodTable && other.SizeBytes == SizeBytes && other.Live == Live && other.Dead == Dead;
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         => obj is HeapEntry other && Equals(other);
 
         public override int GetHashCode()

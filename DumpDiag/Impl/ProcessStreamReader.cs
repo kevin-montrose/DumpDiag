@@ -78,7 +78,7 @@ namespace DumpDiag.Impl
 
             private readonly ProcessStreamReader inner;
 
-            private char[] charBufferWhole;
+            private char[]? charBufferWhole;
             private Memory<char> charBuffer;
             private int readFromCharBufferIx;
             private int writeToCharBufferIx;
@@ -87,8 +87,8 @@ namespace DumpDiag.Impl
 
             private RingBuffer byteBuffer;
 
-            private OwnedSequence<char> pendingSequenceHead;
-            private OwnedSequence<char> pendingSequenceTail;
+            private OwnedSequence<char>? pendingSequenceHead;
+            private OwnedSequence<char>? pendingSequenceTail;
             private bool savedSequenceForMultiCharNewLine;
 
             private bool streamFinished;
@@ -96,14 +96,27 @@ namespace DumpDiag.Impl
 
             private Mode mode;
 
-            public OwnedSequence<char> Current { get; private set; }
+            private OwnedSequence<char>? _current;
+            public OwnedSequence<char> Current
+            {
+                get
+                {
+                    var ret = _current;
+                    if (ret == null)
+                    {
+                        throw new InvalidOperationException("Accessed enumerator in invalid state");
+                    }
+
+                    return ret;
+                }
+            }
             object IEnumerator.Current => Current;
 
             internal Enumerator(ProcessStreamReader inner)
             {
                 this.inner = inner;
-                
-                Current = default;
+
+                _current = default;
 
                 charBufferWhole = null;
                 charBuffer = Memory<char>.Empty;
@@ -137,7 +150,7 @@ namespace DumpDiag.Impl
                         case Mode.ProcessCharsInLoop:
                             if (ProcessCharsInLoop(ref this, out var toReturnLoop))
                             {
-                                Current = toReturnLoop;
+                                _current = toReturnLoop;
                                 return true;
                             }
                             break;
@@ -147,20 +160,24 @@ namespace DumpDiag.Impl
                         case Mode.HandleLeftOverCharsInBuffer:
                             if (HandleLeftOverCharsInBuffer(ref this, out var toReturnBuffer))
                             {
-                                Current = toReturnBuffer;
+                                _current = toReturnBuffer;
                                 return true;
                             }
                             break;
                         case Mode.HandleLeftOverSequence:
                             if (HandleLeftOverSequence(ref this, out var toReturnSequence))
                             {
-                                Current = toReturnSequence;
+                                _current = toReturnSequence;
                                 return true;
                             }
                             break;
                         case Mode.LastRun:
                             LastRun(ref this);
                             return false;
+
+                        default:
+                        case Mode.Ended:
+                            throw new InvalidOperationException($"Unexpected mode: {mode}");
                     }
                 }
 
@@ -176,7 +193,7 @@ namespace DumpDiag.Impl
                     self.mode = Mode.Ended;
                 }
 
-                static bool HandleLeftOverSequence(ref Enumerator self, out OwnedSequence<char> toReturn)
+                static bool HandleLeftOverSequence(ref Enumerator self, out OwnedSequence<char>? toReturn)
                 {
                     // if there's any partial sequence, but the sequence ended exactly, handle it
                     if (self.pendingSequenceHead != null)
@@ -188,19 +205,24 @@ namespace DumpDiag.Impl
                         return true;
                     }
 
-                    toReturn = default;
+                    toReturn = null;
 
                     self.mode = Mode.LastRun;
                     return false;
                 }
 
-                static bool HandleLeftOverCharsInBuffer(ref Enumerator self, out OwnedSequence<char> toReturn)
+                static bool HandleLeftOverCharsInBuffer(ref Enumerator self, out OwnedSequence<char>? toReturn)
                 {
                     // if there's anything left in the buffer when the stream ends, handle it
                     if (self.readFromCharBufferIx != self.writeToCharBufferIx)
                     {
+                        if (self.charBufferWhole == null)
+                        {
+                            throw new Exception("Shouldn't be possible");
+                        }
+
                         var toAddMem = self.charBuffer[self.readFromCharBufferIx..self.writeToCharBufferIx];
-                        
+
                         toReturn = PrepareReturn(ref self.pendingSequenceHead, ref self.pendingSequenceTail, self.inner.charPool, self.charBufferWhole, toAddMem);
 
                         self.mode = Mode.HandleLeftOverSequence;
@@ -247,6 +269,11 @@ namespace DumpDiag.Impl
                             var toAddMem = self.charBuffer[self.readFromCharBufferIx..];
                             if (toAddMem.Length > 0)
                             {
+                                if (self.charBufferWhole == null)
+                                {
+                                    throw new Exception("Shouldn't be possible");
+                                }
+
                                 var toAdd = OwnedSequence<char>.Create(self.inner.charPool, self.charBufferWhole, toAddMem);
 
                                 if (self.pendingSequenceTail != null)
@@ -279,7 +306,7 @@ namespace DumpDiag.Impl
                     self.mode = Mode.StartLoop;
                 }
 
-                static bool ProcessCharsInLoop(ref Enumerator self, out OwnedSequence<char> toReturn)
+                static bool ProcessCharsInLoop(ref Enumerator self, out OwnedSequence<char>? toReturn)
                 {
                     var newLineSpan = self.inner.newLine.Span;
 
@@ -291,6 +318,11 @@ namespace DumpDiag.Impl
                         // we should only do this immediately after a roll over, which means new
                         // characters should be going into the front of the buffer
                         Debug.Assert(self.startOfNewCharsIx == 0);
+
+                        if (self.pendingSequenceTail == null)
+                        {
+                            throw new Exception("Shouldn't be possible");
+                        }
 
                         // our last loop through resulted in rolling over a buffer,
                         // which means that we _might_ have a newline split across
@@ -324,6 +356,11 @@ namespace DumpDiag.Impl
 
                         var toAddMem = self.charBuffer[startOfCharsToAddIx..endOfCharsToAddIx];
 
+                        if (self.charBufferWhole == null)
+                        {
+                            throw new Exception("Shouldn't be possible");
+                        }
+
                         var ret = PrepareReturn(ref self.pendingSequenceHead, ref self.pendingSequenceTail, self.inner.charPool, self.charBufferWhole, toAddMem);
 
                         // advance indexes to account for the characters we've handled
@@ -338,7 +375,7 @@ namespace DumpDiag.Impl
 
                     self.mode = Mode.FinishLoop;
 
-                    toReturn = default;
+                    toReturn = null;
                     return false;
                 }
 
@@ -398,8 +435,8 @@ namespace DumpDiag.Impl
                 }
 
                 static OwnedSequence<char> PrepareReturn(
-                    ref OwnedSequence<char> pendingSequenceHead,
-                    ref OwnedSequence<char> pendingSequenceTail, 
+                    ref OwnedSequence<char>? pendingSequenceHead,
+                    ref OwnedSequence<char>? pendingSequenceTail,
                     ArrayPool<char> pool,
                     char[] root,
                     ReadOnlyMemory<char> mem
@@ -407,7 +444,7 @@ namespace DumpDiag.Impl
                 {
                     OwnedSequence<char> ret;
 
-                    if (pendingSequenceTail != null)
+                    if (pendingSequenceHead != null && pendingSequenceTail != null)
                     {
                         if (!mem.IsEmpty)
                         {
@@ -435,7 +472,7 @@ namespace DumpDiag.Impl
                     return ret;
                 }
 
-                static OwnedSequence<char> PrepareNewlineStraddledReturn(ref OwnedSequence<char> pendingSequenceHead, ref OwnedSequence<char> pendingSequenceTail)
+                static OwnedSequence<char> PrepareNewlineStraddledReturn(ref OwnedSequence<char>? pendingSequenceHead, ref OwnedSequence<char>? pendingSequenceTail)
                 {
                     // by definition, this can only happen if a new line straddled the end of a buffer
                     // so these MUST be non-null

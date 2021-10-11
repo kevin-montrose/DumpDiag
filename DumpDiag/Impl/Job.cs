@@ -101,7 +101,7 @@ namespace DumpDiag.Impl
 
 
                 [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-                internal static extern IntPtr CreateJobObject([In] ref SECURITY_ATTRIBUTES lpJobAttributes, string lpName);
+                internal static extern IntPtr CreateJobObject([In] ref SECURITY_ATTRIBUTES lpJobAttributes, string? lpName);
 
                 [DllImport("kernel32.dll")]
                 internal static extern bool SetInformationJobObject(IntPtr hJob, JOBOBJECTINFOCLASS infoType, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);

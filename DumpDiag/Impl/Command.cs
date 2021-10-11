@@ -13,10 +13,10 @@ namespace DumpDiag.Impl
     {
         private readonly string prefix;
         private readonly int? count;
-        private readonly string infix;
+        private readonly string? infix;
         private readonly long? addr;
 
-        private Command(string command, int? count, string infix, long? addr)
+        private Command(string command, int? count, string? infix, long? addr)
         {
             this.prefix = command;
             this.count = count;
@@ -65,7 +65,7 @@ namespace DumpDiag.Impl
                 len += 10;              // length of int (decimal) [for count]
             }
 
-            if(infix != null)
+            if (infix != null)
             {
                 len += 1;               // space
                 len += infix.Length;    // infix
@@ -74,7 +74,7 @@ namespace DumpDiag.Impl
                 len += 10;              // length of int (decimal) [for count (again)]
             }
 
-            if(addr != null)
+            if (addr != null)
             {
                 len += 1;               // space
                 len += 16;              // length of long (hex) [for addr]
@@ -98,8 +98,8 @@ namespace DumpDiag.Impl
 
                 dataLength += writtenChars;
             }
-            
-            if(infix != null)
+
+            if (infix != null)
             {
                 data[dataLength] = ' ';
                 dataLength++;
@@ -109,6 +109,11 @@ namespace DumpDiag.Impl
 
                 data[dataLength] = ' ';
                 dataLength++;
+
+                if (count == null)
+                {
+                    throw new Exception("Expectation is count is always set if infix is set, this shouldn't be possible");
+                }
 
                 var formatRes = count.Value.TryFormat(data[dataLength..], out var writtenChars);
                 Debug.Assert(formatRes);

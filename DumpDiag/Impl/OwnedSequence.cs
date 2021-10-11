@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -25,12 +26,12 @@ namespace DumpDiag.Impl
         private static readonly ThreadAffinitizedObjectPool<OwnedSequence<T>> ObjectPool = new ThreadAffinitizedObjectPool<OwnedSequence<T>>();
 
         private ArrayPool<T> pool;
-        private T[] root;
+        private T[]? root;
 
         [Obsolete("Do not use directly, only for internal use")]
         public OwnedSequence()
         {
-            pool = null;
+            pool = ArrayPool<T>.Shared;
             root = null;
 
             Next = null;
@@ -38,7 +39,9 @@ namespace DumpDiag.Impl
             Memory = ReadOnlyMemory<T>.Empty;
         }
 
-        private OwnedSequence(ArrayPool<T> pool, T[] root, ReadOnlyMemory<T> part)
+#pragma warning disable CS0618
+        private OwnedSequence(ArrayPool<T> pool, T[] root, ReadOnlyMemory<T> part) : this()
+#pragma warning restore CS0618
         {
             Initialize(pool, root, part);
         }
@@ -60,7 +63,7 @@ namespace DumpDiag.Impl
         /// </summary>
         internal void SetNext(OwnedSequence<T> next)
         {
-            Debug.Assert(Next == null);
+            Debug.Assert(Next == null, $"Next was {Next}");
             Next = next;
 
             next.RunningIndex = RunningIndex + Memory.Length;
@@ -112,7 +115,7 @@ namespace DumpDiag.Impl
         /// <summary>
         /// Only used for debugging purposes.
         /// </summary>
-        private static int GetRefCount(T[] root)
+        private static int GetRefCount(T[]? root)
         {
             if (root == null)
             {
@@ -129,7 +132,10 @@ namespace DumpDiag.Impl
         /// 
         /// Returns true if the underlying array has 0 outstanding references.
         /// </summary>
-        internal static bool DecrRefCount(T[] root)
+        internal static bool DecrRefCount(
+            [NotNullWhen(returnValue:true)]
+            T[]? root
+        )
         {
             if (root == null)
             {
@@ -206,7 +212,7 @@ namespace DumpDiag.Impl
         public override string ToString()
         {
             var ret = new StringBuilder();
-            ReadOnlySequenceSegment<T> cur = this;
+            ReadOnlySequenceSegment<T>? cur = this;
             while (cur != null)
             {
                 ret.AppendJoin("", cur.Memory.ToArray());

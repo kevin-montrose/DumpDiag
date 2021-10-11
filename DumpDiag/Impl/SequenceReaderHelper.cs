@@ -1,13 +1,14 @@
 ﻿using System;
 using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using System.Text;
 
 namespace DumpDiag.Impl
 {
     internal static class SequenceReaderHelper
     {
         private const string FREE_STRING = "Free";
+        private const string INSTANCE_ATTR_STRING = "instance";
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool TryParseHeapEntry(ReadOnlySequence<char> sequence, bool live, out HeapEntry entry, out bool free)
@@ -261,7 +262,12 @@ namespace DumpDiag.Impl
             return true;
         }
 
-        internal static bool TryParseCharacters(ReadOnlySequence<char> sequence, int length, ArrayPool<char> pool, out string chars)
+        internal static bool TryParseCharacters(
+            ReadOnlySequence<char> sequence,
+            int length,
+            ArrayPool<char> pool,
+            [NotNullWhen(returnValue: true)]
+            out string? chars)
         {
             const int MAX_ON_CHARS_ON_STACK = 128;
 
@@ -400,7 +406,12 @@ namespace DumpDiag.Impl
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static bool TryParseClassName(ReadOnlySequence<char> seq, ArrayPool<char> pool, out string name)
+        internal static bool TryParseClassName(
+            ReadOnlySequence<char> seq,
+            ArrayPool<char> pool,
+            [NotNullWhen(returnValue: true)]
+            out string? name
+        )
         {
             // pattern is: ^ Class Name: \s+ (?<className> .*?) $
 
@@ -589,7 +600,12 @@ namespace DumpDiag.Impl
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static bool TryParseTypeName(ReadOnlySequence<char> seq, ArrayPool<char> arrayPool, out string name)
+        internal static bool TryParseTypeName(
+            ReadOnlySequence<char> seq,
+            ArrayPool<char> arrayPool,
+            [NotNullWhen(returnValue: true)]
+            out string? name
+        )
         {
             // pattern is: ^ Name: \s+ (?<name> .*?) $
 
@@ -616,6 +632,104 @@ namespace DumpDiag.Impl
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseBaseSize(
+            ReadOnlySequence<char> seq,
+            out int sizeBytes
+        )
+        {
+            // pattern is: ^ BaseSize: \s+ 0x(?<size> [0-9a-f]+) $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // handle BaseSize:
+            if (!reader.TryReadTo(out ReadOnlySequence<char> baseSizeStr, ' '))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            if (!baseSizeStr.Equals("BaseSize:", StringComparison.Ordinal))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // handle 0x
+            if (!reader.TryReadTo(out ReadOnlySequence<char> zeroStr, 'x'))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            if (!zeroStr.Equals("0", StringComparison.Ordinal))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            // read actual size
+            var sizeStr = reader.UnreadSequence;
+            if (!sizeStr.TryParseHexInt(out sizeBytes))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseComponentSize(
+            ReadOnlySequence<char> seq,
+            out int sizeBytes
+        )
+        {
+            // pattern is: ^ ComponentSize: \s+ 0x(?<size> [0-9a-f]+) $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // handle BaseSize:
+            if (!reader.TryReadTo(out ReadOnlySequence<char> baseSizeStr, ' '))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            if (!baseSizeStr.Equals("ComponentSize:", StringComparison.Ordinal))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // handle 0x
+            if (!reader.TryReadTo(out ReadOnlySequence<char> zeroStr, 'x'))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            if (!zeroStr.Equals("0", StringComparison.Ordinal))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            // read actual size
+            var sizeStr = reader.UnreadSequence;
+            if (!sizeStr.TryParseHexInt(out sizeBytes))
+            {
+                sizeBytes = default;
+                return false;
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool TryParseAsyncStateMachineDetails(ReadOnlySequence<char> seq, ArrayPool<char> arrayPool, out AsyncStateMachineDetails details)
         {
             // pattern is: ^ (?<addr> [0-9a-f]+) \s+ (?<mt> [0-9a-f]+) \s+ (?<size> \d+) \s+ (?<status> \S+) \s+ (?<state> \-?\d+) \s+ (?<description> .*?) $
@@ -623,13 +737,13 @@ namespace DumpDiag.Impl
             var reader = new SequenceReader<char>(seq);
 
             // parse addr
-            if(!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ' '))
+            if (!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ' '))
             {
                 details = default;
                 return false;
             }
 
-            if(!addrStr.TryParseHexLong(out var addr))
+            if (!addrStr.TryParseHexLong(out var addr))
             {
                 details = default;
                 return false;
@@ -668,7 +782,7 @@ namespace DumpDiag.Impl
             reader.AdvancePast(' ');
 
             // skip status
-            if(!reader.TryReadTo(out ReadOnlySequence<char> statusStr, ' '))
+            if (!reader.TryReadTo(out ReadOnlySequence<char> statusStr, ' '))
             {
                 details = default;
                 return false;
@@ -696,6 +810,179 @@ namespace DumpDiag.Impl
             var descStrStr = descStr.AsString(arrayPool);
 
             details = new AsyncStateMachineDetails(addr, mt, size, descStrStr);
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseInstanceFieldWithValue(ReadOnlySequence<char> sequence, ArrayPool<char> arrayPool, out InstanceFieldWithValue field)
+        {
+            // pattern is: ^ (?<methodTable> [0-9a-f]+) \s+ (?<field> \S+) \s+ (?<offset> [0-9a-f]+) \s+ (?<type> \S+) \s+ (?<vt> \S+) \s+ (?<attr> \S+) \s+ (?<value> [0-9a-f]+) \s+ (?<name> \S+) $
+
+            var reader = new SequenceReader<char>(sequence);
+
+            // skip method table
+            if (!reader.TryReadTo(out ReadOnlySequence<char> methodTableStr, ' '))
+            {
+                field = default;
+                return false;
+            }
+
+            if (!methodTableStr.TryParseHexLong(out var mt))
+            {
+                field = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip field
+            if (!reader.TryAdvanceTo(' ', advancePastDelimiter: false))
+            {
+                field = default;
+                return false;
+            }
+            reader.AdvancePast(' ');
+
+            // skip offset
+            if (!reader.TryReadTo(out ReadOnlySequence<char> offsetStr, ' '))
+            {
+                field = default;
+                return false;
+            }
+
+            if (!offsetStr.TryParseHexInt(out _))
+            {
+                field = default;
+                return false;
+            }
+
+            // skip type
+            reader.Advance(20);
+            reader.AdvancePast(' ');
+
+            // skip VT
+            if (!reader.TryAdvanceTo(' ', advancePastDelimiter: false))
+            {
+                field = default;
+                return false;
+            }
+            reader.AdvancePast(' ');
+
+            // parse attr
+            if (!reader.TryReadTo(out ReadOnlySequence<char> attrStr, ' '))
+            {
+                field = default;
+                return false;
+            }
+
+            if(!attrStr.Equals(INSTANCE_ATTR_STRING, StringComparison.Ordinal))
+            {
+                field = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // parse value
+            if (!reader.TryReadTo(out ReadOnlySequence<char> valueStr, ' '))
+            {
+                field = default;
+                return false;
+            }
+
+            if (!valueStr.TryParseHexLong(out var value))
+            {
+                field = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read name
+            var nameStr = reader.UnreadSequence.AsString(arrayPool);
+
+            field = new InstanceFieldWithValue(new InstanceField(nameStr, mt), value);
+            return true;
+        }
+
+
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseInstanceFieldNoValue(ReadOnlySequence<char> sequence, ArrayPool<char> arrayPool, out InstanceField field)
+        {
+            var reader = new SequenceReader<char>(sequence);
+
+            // skip method table
+            if (!reader.TryReadTo(out ReadOnlySequence<char> methodTableStr, ' '))
+            {
+                field = default;
+                return false;
+            }
+
+            if (!methodTableStr.TryParseHexLong(out var mt))
+            {
+                field = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip field
+            if (!reader.TryAdvanceTo(' ', advancePastDelimiter: false))
+            {
+                field = default;
+                return false;
+            }
+            reader.AdvancePast(' ');
+
+            // skip offset
+            if (!reader.TryReadTo(out ReadOnlySequence<char> offsetStr, ' '))
+            {
+                field = default;
+                return false;
+            }
+
+            if (!offsetStr.TryParseHexInt(out _))
+            {
+                field = default;
+                return false;
+            }
+
+            // skip type
+            reader.Advance(20);
+            reader.AdvancePast(' ');
+
+            // skip VT
+            if (!reader.TryAdvanceTo(' ', advancePastDelimiter: false))
+            {
+                field = default;
+                return false;
+            }
+            reader.AdvancePast(' ');
+
+            // parse attr
+            if (!reader.TryReadTo(out ReadOnlySequence<char> attrStr, ' '))
+            {
+                field = default;
+                return false;
+            }
+
+            if (!attrStr.Equals(INSTANCE_ATTR_STRING, StringComparison.Ordinal))
+            {
+                field = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // get name
+            var unread = reader.UnreadSequence;
+            var ix = unread.LastIndexOf(' ');
+            
+            var name = unread.Slice(ix + 1);
+            var nameStr = name.AsString(arrayPool);
+
+            field = new InstanceField(nameStr, mt);
             return true;
         }
     }

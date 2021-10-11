@@ -17,7 +17,7 @@ namespace DumpDiag.Impl
         where T : class, new()
     {
         private readonly int mask;
-        private readonly T[] pool;
+        private readonly T?[] pool;
 
         internal ThreadAffinitizedObjectPool()
         {
@@ -38,8 +38,7 @@ namespace DumpDiag.Impl
                 var ix = (i + offset) & mask;   // faster way to due % pool.Length
 
                 var toReuse = Volatile.Read(ref pool[ix]);
-                var canUse = toReuse != null;
-                if (canUse && Interlocked.CompareExchange(ref pool[ix], null, toReuse) == toReuse)
+                if (toReuse != null && Interlocked.CompareExchange(ref pool[ix], null, toReuse) == toReuse)
                 {
                     return toReuse;
                 }

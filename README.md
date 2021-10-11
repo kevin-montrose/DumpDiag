@@ -142,6 +142,47 @@ Total(bytes)   Dead(bytes)   Live(bytes)   Value
 
 ...
 
+Large Async State Machines
+==========================
+
+System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[[System.Threading.Tasks.VoidTaskResult, System.Private.CoreLib],[Microsoft.Web.WebView2.WinForms.WebView2+<InitCoreWebView2Async>d__13, Microsoft.Web.WebView2.WinForms]] (136 bytes) (6 fields in state)
+                Field   Type
+----------------------------
+           <>1__state   System.Int32
+            <>4__this   Microsoft.Web.WebView2.WinForms.WebView2
+         <>t__builder   System.Runtime.CompilerServices.AsyncTaskMethodBuilder
+               <>u__1   System.Runtime.CompilerServices.TaskAwaiter`1[[Microsoft.Web.WebView2.Core.CoreWebView2Environment, Microsoft.Web.WebView2.Core]]
+               <>u__2   System.Runtime.CompilerServices.TaskAwaiter`1[[Microsoft.Web.WebView2.Core.CoreWebView2Controller, Microsoft.Web.WebView2.Core]]
+          environment   Microsoft.Web.WebView2.Core.CoreWebView2Environment
+
+System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[[System.Threading.Tasks.VoidTaskResult, System.Private.CoreLib],[LINQPad.ExecutionModel.InPipe+<Go>d__6, LINQPad.Runtime]] (96 bytes) (10 fields in state)
+                Field   Type
+----------------------------
+           <>1__state   System.Int32
+            <>4__this   LINQPad.ExecutionModel.InPipe
+               <>s__5   System.Boolean
+         <>t__builder   System.Runtime.CompilerServices.AsyncVoidMethodBuilder
+               <>u__1   System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1+ConfiguredTaskAwaiter[[System.Boolean, System.Private.CoreLib]]
+             <ex>5__6   System.Exception
+<latestMessageID>5__3   System.Nullable`1[[System.Int32, System.Private.CoreLib]]
+            <msg>5__4   System.Byte[]
+     <spinCycles>5__1   System.Int32
+             <sw>5__2   System.Diagnostics.Stopwatch
+
+System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[[System.Threading.Tasks.VoidTaskResult, System.Private.CoreLib],[LINQPad.UI.MainForm+<<OnActivated>g__Continue|113_0>d, LINQPad.GUI]] (96 bytes) (4 fields in state)
+                Field   Type
+----------------------------
+           <>1__state   System.Int32
+            <>4__this   LINQPad.UI.MainForm
+         <>t__builder   System.Runtime.CompilerServices.AsyncVoidMethodBuilder
+               <>u__1   System.Runtime.CompilerServices.TaskAwaiter
+
+System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[[System.Threading.Tasks.VoidTaskResult, System.Private.CoreLib],[LINQPad.LanguageServices.WSAgent+<CheckActivation>d__18, Resources]] (96 bytes) (0 fields in state)
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+No valid examples to inspect found on heap, reporting only size
+
+...
+
 Unique Stack Frames
 ===================
 Count   Call Site

@@ -19,7 +19,7 @@ namespace DumpDiag.Impl
         public bool Equals(NameWithSize other)
         => SizeBytes == other.SizeBytes && Name == other.Name;
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         => obj is NameWithSize other && Equals(other);
 
         public override int GetHashCode()

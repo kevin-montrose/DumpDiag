@@ -23,7 +23,7 @@ namespace DumpDiag.Impl
         public bool Equals(AsyncStateMachineDetails other)
         => Address == other.Address && MethodTable == other.MethodTable && SizeBytes == other.SizeBytes && Description == other.Description;
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         => obj is AsyncStateMachineDetails other && Equals(other);
 
         public override int GetHashCode()

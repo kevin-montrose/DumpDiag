@@ -55,6 +55,23 @@ namespace DumpDiag.Tests
             }
         }
 
+        [Theory]
+        [InlineData("a", 'b', -1)]
+        [InlineData("a", 'a', 0)]
+        [InlineData("aa", 'b', -1)]
+        [InlineData("aa", 'a', 1)]
+        [InlineData("ab", 'a', 0)]
+        [InlineData("hello", 'e', 1)]
+        [InlineData("hello", 'l', 3)]
+        [InlineData("hello", 'x', -1)]
+        public void LastIndexOf(string a, char b, int expectedValue)
+        {
+            foreach (var seq in MakeSequencesFrom(a))
+            {
+                Assert.Equal(expectedValue, seq.LastIndexOf(b));
+            }
+        }
+
         private static IEnumerable<ReadOnlySequence<char>> MakeSequencesFrom(string text)
         {
             var singleSegment = new ReadOnlySequence<char>(text.AsMemory());

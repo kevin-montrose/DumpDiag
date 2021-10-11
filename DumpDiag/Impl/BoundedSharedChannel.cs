@@ -34,7 +34,20 @@ namespace DumpDiag.Impl
         {
             private readonly BoundedSharedChannel<T> inner;
 
-            public T Current => inner.enumeratorCurrent;
+            public T Current
+            {
+                get
+                {
+                    var ret = inner.enumeratorCurrent;
+
+                    if (ret == null)
+                    {
+                        throw new InvalidOperationException("Enumerator in invalid state");
+                    }
+
+                    return ret;
+                }
+            }
 
             internal AsyncEnumerator(BoundedSharedChannel<T> inner)
             {
@@ -69,17 +82,17 @@ namespace DumpDiag.Impl
         private static readonly ThreadAffinitizedObjectPool<BoundedSharedChannel<T>> ObjectPool = new ThreadAffinitizedObjectPool<BoundedSharedChannel<T>>();
 
         private readonly SemaphoreSlim signal;
-        private readonly ConcurrentQueue<T> inner;
+        private readonly ConcurrentQueue<T?> inner;
 
         // we only support one reader, so we can re-use this allocation for tracking our enumerator's
         // Current value - AND make all the enumerator and enumerable's structs accordingly
-        private T enumeratorCurrent;
+        private T? enumeratorCurrent;
 
         [Obsolete("Do not use directly, meant for internal object pooling")]
         public BoundedSharedChannel()
         {
             this.signal = new SemaphoreSlim(0);
-            this.inner = new ConcurrentQueue<T>();
+            this.inner = new ConcurrentQueue<T?>();
         }
 
         internal AsyncEnumerable ReadUntilCompletedAsync()
@@ -92,7 +105,7 @@ namespace DumpDiag.Impl
             AppendInternal(value);
         }
 
-        private void AppendInternal(T value)
+        private void AppendInternal(T? value)
         {
             inner.Enqueue(value);
             signal.Release();

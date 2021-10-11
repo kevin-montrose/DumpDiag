@@ -25,7 +25,7 @@ namespace DumpDiag.Impl
             return other.MethodDetails.SequenceEqual(MethodDetails);
         }
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         => obj is DelegateDetails other && Equals(other);
 
         public override int GetHashCode()
@@ -61,7 +61,7 @@ namespace DumpDiag.Impl
         public bool Equals(DelegateMethodDetails other)
         => other.TargetAddress == TargetAddress && other.MethodTable == MethodTable && other.BackingMethodName == BackingMethodName;
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         => obj is DelegateMethodDetails other && Equals(other);
 
         public override int GetHashCode()

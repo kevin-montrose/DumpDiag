@@ -1,6 +1,7 @@
 ﻿using DumpDiag.Impl;
 using DumpDiag.Tests.Helpers;
 using System;
+using System.Collections.Immutable;
 using System.IO;
 using System.Threading.Tasks;
 using Xunit;
@@ -16,12 +17,13 @@ namespace DumpDiag.Tests
         {
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
+            ImmutableDictionary<string, ReferenceStats> res;
             await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                var res = await diag.LoadStringCountsAsync().ConfigureAwait(false);
-
-                Assert.NotEmpty(res);
+                res = await diag.LoadStringCountsAsync().ConfigureAwait(false);
             }
+
+            Assert.NotEmpty(res);
         }
 
         [Fact]
@@ -29,25 +31,31 @@ namespace DumpDiag.Tests
         {
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
+            ImmutableDictionary<string, ReferenceStats> res;
             await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                var res = await diag.LoadDelegateCountsAsync().ConfigureAwait(false);
-
-                Assert.NotEmpty(res);
+                res = await diag.LoadDelegateCountsAsync().ConfigureAwait(false);
             }
+
+            Assert.NotEmpty(res);
         }
 
         [Fact]
         public async Task LoadCharacterArrayCountsAsync()
         {
+            Action del = () => { Console.WriteLine(); };
+
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
+            ImmutableDictionary<string, ReferenceStats> res;
             await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                var res = await diag.LoadCharacterArrayCountsAsync().ConfigureAwait(false);
-
-                Assert.NotEmpty(res);
+                res = await diag.LoadCharacterArrayCountsAsync().ConfigureAwait(false);
             }
+
+            Assert.NotEmpty(res);
+
+            GC.KeepAlive(del);
         }
 
         [Fact]
@@ -55,13 +63,32 @@ namespace DumpDiag.Tests
         {
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
+            ThreadAnalysis res;
             await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                var res = await diag.LoadThreadDetailsAsync().ConfigureAwait(false);
-
-                Assert.NotEmpty(res.StackFrameCounts);
-                Assert.NotEmpty(res.ThreadStacks);
+                res = await diag.LoadThreadDetailsAsync().ConfigureAwait(false);
             }
+
+            Assert.NotEmpty(res.StackFrameCounts);
+            Assert.NotEmpty(res.ThreadStacks);
+        }
+
+        [Fact]
+        public async Task GetAsyncMachineBreakdownsAsync()
+        {
+            var task = Task.Delay(1_000);
+
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+
+            ImmutableList<AsyncMachineBreakdown> res;
+            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            {
+                res = await diag.GetAsyncMachineBreakdownsAsync().ConfigureAwait(false);
+            }
+
+            Assert.NotEmpty(res);
+
+            await task.ConfigureAwait(false);
         }
 
         [Theory]
@@ -83,16 +110,17 @@ namespace DumpDiag.Tests
         {
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
-            await using var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false);
-
-            var res = await diag.AnalyzeAsync().ConfigureAwait(false);
-
             string written;
-            using (var writer = new StringWriter())
+            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                await res.WriteToAsync(writer, 1).ConfigureAwait(false);
+                var res = await diag.AnalyzeAsync().ConfigureAwait(false);
 
-                written = writer.ToString();
+                using (var writer = new StringWriter())
+                {
+                    await res.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+
+                    written = writer.ToString();
+                }
             }
 
             Assert.NotEmpty(written);

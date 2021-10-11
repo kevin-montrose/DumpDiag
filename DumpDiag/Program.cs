@@ -15,13 +15,22 @@ namespace DumpDiag
         public static async Task Main(string[] args)
         {
             var dotnetDumpOption =
-                new Option<FileInfo>(
+                new Option<FileInfo?>(
                     new[] { "-ddp", "--dotnet-dump-path" },
-                    getDefaultValue: () => null,
+                    getDefaultValue:
+                    () =>
+                    {
+                        if (DotNetToolFinder.TryFind("dotnet-dump", out var path, out _))
+                        {
+                            return new FileInfo(path);
+                        }
+
+                        return null;
+                    },
                     description: "Path to dotnet-dump executable, will be inferred if omitted"
                 );
             var dumpFileOption =
-                new Option<FileInfo>(
+                new Option<FileInfo?>(
                     new[] { "-df", "--dump-file" },
                     getDefaultValue: () => null,
                     description: "Existing full process dump to analyze"
@@ -39,13 +48,13 @@ namespace DumpDiag
                     description: "How many processes to use to analyze the dump"
                 );
             var saveDumpOption =
-                new Option<FileInfo>(
+                new Option<FileInfo?>(
                     new[] { "-sd", "--save-dump-file" },
                     getDefaultValue: () => null,
                     description: "Used in conjunction with --dump-process-id, saves a new full process dump to the given file"
                 );
             var reportFileOption =
-                new Option<FileInfo>(
+                new Option<FileInfo?>(
                     new[] { "-rf", "--report-file" },
                     getDefaultValue: () => null,
                     description: "Instead of writing to standard out, saves diagnostic report to the given file"
@@ -55,6 +64,12 @@ namespace DumpDiag
                     new[] { "-mc", "--min-count" },
                     getDefaultValue: () => 1,
                     description: "Minimum count of strings, char[], type instances, etc. to include in analysis"
+                );
+            var minAsyncSizeOption =
+                new Option<int>(
+                    new [] { "-mas", "--min-async-size" },
+                    getDefaultValue: () => 1,
+                    description: "Minimum size (in bytes) of async state machines to include a field breakdown in analysis"
                 );
             var overwriteOption =
                 new Option<bool>(
@@ -68,10 +83,10 @@ namespace DumpDiag
                     getDefaultValue: static () => false,
                     description: "Suppress progress updates"
                 );
-            var commands = new RootCommand { dotnetDumpOption, dumpFileOption, dumpPidOption, degreeParallelism, saveDumpOption, minCountOption, reportFileOption, overwriteOption, quietOption };
+            var commands = new RootCommand { dotnetDumpOption, dumpFileOption, dumpPidOption, degreeParallelism, saveDumpOption, minCountOption, minAsyncSizeOption, reportFileOption, overwriteOption, quietOption };
 
-            commands.Handler = CommandHandler.Create<FileInfo, FileInfo, int?, int, FileInfo, int, FileInfo, bool, bool>(
-                async static (dotnetDumpPath, dumpFile, dumpProcessId, degreeParallelism, saveDumpFile, minCount, reportFile, overwrite, quiet) =>
+            commands.Handler = CommandHandler.Create<FileInfo?, FileInfo?, int?, int, FileInfo?, int, int, FileInfo?, bool, bool>(
+                async static (dotnetDumpPath, dumpFile, dumpProcessId, degreeParallelism, saveDumpFile, minCount, minAsyncSize, reportFile, overwrite, quiet) =>
                 {
                     if (dumpFile == null && dumpProcessId == null)
                     {
@@ -97,10 +112,16 @@ namespace DumpDiag
                         Environment.Exit(-5);
                     }
 
-                    if(minCount < 1)
+                    if (minCount < 1)
                     {
                         Console.Error.WriteLine("--min-count must be >= 1");
                         Environment.Exit(-6);
+                    }
+
+                    if (minAsyncSize < 1)
+                    {
+                        Console.Error.WriteLine("--min-async-size must be >= 1");
+                        Environment.Exit(-7);
                     }
 
                     await RunAsync(
@@ -110,6 +131,7 @@ namespace DumpDiag
                         degreeParallelism,
                         saveDumpFile,
                         minCount,
+                        minAsyncSize,
                         reportFile,
                         overwrite,
                         quiet
@@ -134,24 +156,27 @@ namespace DumpDiag
         }
 
         private static async ValueTask RunAsync(
-            FileInfo dotnetDump, 
-            FileInfo dumpFile, 
-            int? dumpPid, 
-            int degreeParallelism, 
-            FileInfo saveDumpTo, 
+            FileInfo? dotnetDump,
+            FileInfo? dumpFile,
+            int? dumpPid,
+            int degreeParallelism,
+            FileInfo? saveDumpTo,
             int minCount,
-            FileInfo saveReportTo,
-            bool overwrite, 
+            int minAsyncStateMachineSize,
+            FileInfo? saveReportTo,
+            bool overwrite,
             bool quiet
         )
         {
-            string dotnetDumpPath;
+            // todo: async state machine size minimum
+
+            string? dotnetDumpPath;
             if (dotnetDump == null)
             {
                 if (!DotNetToolFinder.TryFind("dotnet-dump", out dotnetDumpPath, out var error))
                 {
                     Console.Error.WriteLine($"Could not find dotnet-dump: {error}");
-                    Environment.Exit(-7);
+                    Environment.Exit(-8);
                 }
             }
             else
@@ -159,19 +184,19 @@ namespace DumpDiag
                 if (!dotnetDump.Exists)
                 {
                     Console.Error.WriteLine($"dotnet-dump does not exist at: {dotnetDump.FullName}");
-                    Environment.Exit(-8);
+                    Environment.Exit(-9);
                 }
 
                 dotnetDumpPath = dotnetDump.FullName;
             }
 
-            string saveReportToPath;
+            string? saveReportToPath;
             if (saveReportTo != null)
             {
                 if (saveReportTo.Exists && !overwrite)
                 {
                     Console.Error.WriteLine($"Report file already exists: {saveReportTo.FullName}");
-                    Environment.Exit(-9);
+                    Environment.Exit(-10);
                 }
 
                 saveReportToPath = saveReportTo.FullName;
@@ -196,7 +221,7 @@ namespace DumpDiag
                     if (saveDumpTo.Exists && !overwrite)
                     {
                         Console.Error.WriteLine($"Dump file already exists: {saveDumpTo}");
-                        Environment.Exit(-10);
+                        Environment.Exit(-11);
                     }
 
                     dumpFilePath = saveDumpTo.FullName;
@@ -204,6 +229,12 @@ namespace DumpDiag
 
 
                     var dumpDir = Path.GetDirectoryName(dumpFilePath);
+                    if (dumpDir == null)
+                    {
+                        Console.Error.WriteLine($"Could not get directory for: {dumpFilePath}");
+                        Environment.Exit(-12);
+                    }
+
                     Directory.CreateDirectory(dumpDir);
                 }
                 else
@@ -213,6 +244,11 @@ namespace DumpDiag
                     deleteDumpFile = true;
                 }
 
+                if (dumpPid == null)
+                {
+                    throw new Exception("Shouldn't be possible");
+                }
+
                 Report($"Taking dump of process id: {dumpPid.Value}", quiet);
                 var (success, log) = await DumpProcess.TakeDumpAsync(dotnetDumpPath, dumpPid.Value, dumpFilePath);
 
@@ -220,7 +256,7 @@ namespace DumpDiag
                 {
                     Console.Error.WriteLine("Dump failed");
                     Console.Error.WriteLine(log);
-                    Environment.Exit(-11);
+                    Environment.Exit(-13);
                 }
             }
             else
@@ -228,7 +264,7 @@ namespace DumpDiag
                 if (!dumpFile.Exists)
                 {
                     Console.Error.WriteLine($"Could not find dump file: {dumpFile.FullName}");
-                    Environment.Exit(-12);
+                    Environment.Exit(-14);
                 }
 
                 dumpFilePath = dumpFile.FullName;
@@ -257,7 +293,7 @@ namespace DumpDiag
 
                     using (var writer = new StringWriter())
                     {
-                        await res.WriteToAsync(writer, minCount);
+                        await res.WriteToAsync(writer, minCount, minAsyncStateMachineSize);
 
                         Console.Out.WriteLine(writer.ToString());
                     }
@@ -268,7 +304,7 @@ namespace DumpDiag
 
                     using (var fs = File.CreateText(saveReportToPath))
                     {
-                        await res.WriteToAsync(fs, minCount);
+                        await res.WriteToAsync(fs, minCount, minAsyncStateMachineSize);
                     }
                 }
             }

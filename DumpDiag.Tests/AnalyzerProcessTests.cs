@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -196,7 +197,7 @@ namespace DumpDiag.Tests
             await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
             {
                 var typeDetails = await LoadTypeDetailsAsync(analyze).ConfigureAwait(false);
-                var stringType = typeDetails["System.String"].Single();
+                var stringType = typeDetails.Single(x => x.Key.TypeName == "System.String").Value.Single();
                 HeapEntry? stringRef = null;
 
                 await foreach (var entry in analyze.LoadHeapAsync(LoadHeapMode.Live).ConfigureAwait(false))
@@ -284,7 +285,7 @@ namespace DumpDiag.Tests
             await using (var analyze = await AnalyzerProcess.CreateAsync(ArrayPool<char>.Shared, dump.DotNetDumpPath, dump.DumpFile))
             {
                 var typeDetails = await LoadTypeDetailsAsync(analyze).ConfigureAwait(false);
-                var stringType = typeDetails["System.String"].Single();
+                var stringType = typeDetails.Single(x => x.Key.TypeName == "System.String").Value.Single();
 
                 var stringRefs = new List<HeapEntry>();
 
@@ -335,7 +336,7 @@ namespace DumpDiag.Tests
             await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
             {
                 var typeDetails = await LoadTypeDetailsAsync(analyze).ConfigureAwait(false);
-                var wellKnownDelegateType = typeDetails[typeof(WellKnownDelegate).FullName].Single();
+                var wellKnownDelegateType = typeDetails.Single(x => x.Key.TypeName == typeof(WellKnownDelegate).FullName).Value.Single();
 
                 var instances = new List<HeapEntry>();
 
@@ -395,9 +396,9 @@ namespace DumpDiag.Tests
             await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
             {
                 var typeDetails = await LoadTypeDetailsAsync(analyze).ConfigureAwait(false);
-                var wellKnownDelegateType = typeDetails[typeof(WellKnownDelegate).FullName].Single();
-                var barType = typeDetails[typeof(Bar).FullName].Single();
-                var objType = typeDetails[typeof(object).FullName].Single();
+                var wellKnownDelegateType = typeDetails.Single(x => x.Key.TypeName == typeof(WellKnownDelegate).FullName).Value.Single();
+                var barType = typeDetails.Single(x => x.Key.TypeName == typeof(Bar).FullName).Value.Single();
+                var objType = typeDetails.Single(x => x.Key.TypeName == typeof(object).FullName).Value.Single();
 
                 HeapEntry? delEntry = null;
                 HeapEntry? barEntry = null;
@@ -453,7 +454,6 @@ namespace DumpDiag.Tests
 
                     curClass = await analyze.LoadEEClassDetailsAsync(curClass.ParentEEClass).ConfigureAwait(false);
                 }
-
             }
 
             static async ValueTask<string> ConcatAsync(IAsyncEnumerable<string> toJoin)
@@ -484,7 +484,7 @@ namespace DumpDiag.Tests
             await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
             {
                 var typeDetails = await LoadTypeDetailsAsync(analyze).ConfigureAwait(false);
-                var charArrayType = typeDetails["System.Char[]"].Single();
+                var charArrayType = typeDetails.Single(x => x.Key.TypeName == "System.Char[]").Value.Single();
 
                 var charArrayHeapEntries = new List<HeapEntry>();
                 await foreach (var entry in analyze.LoadHeapAsync(LoadHeapMode.Live).ConfigureAwait(false))
@@ -514,13 +514,19 @@ namespace DumpDiag.Tests
         [MemberData(nameof(ArrayPoolParameters))]
         public async Task LoadAsyncStateMachinesAsync(ArrayPool<char> pool)
         {
+            var completeSignal = new SemaphoreSlim(0);
+
+            var incompleteTask = LoadAsyncStateMachinesAsync_IncompleteTaskAsync(completeSignal);
+            var incompleteValueTask = LoadAsyncStateMachinesAsync_IncompleteValueTaskAsync(completeSignal);
+            var incompleteTaskRun = Task.Run(() => completeSignal.Wait());
+
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
             await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
             {
                 var shouldMatch = new List<AsyncStateMachineDetails>();
 
-                await foreach(var line in analyze.SendCommand(Command.CreateCommand("dumpasync -completed")).ConfigureAwait(false))
+                await foreach (var line in analyze.SendCommand(Command.CreateCommand("dumpasync -completed")).ConfigureAwait(false))
                 {
                     var entryStr = line.ToString();
                     line.Dispose();
@@ -538,31 +544,143 @@ namespace DumpDiag.Tests
                 }
 
                 var actual = new List<AsyncStateMachineDetails>();
-                await foreach(var entry in analyze.LoadAsyncStateMachinesAsync().ConfigureAwait(false))
+                await foreach (var entry in analyze.LoadAsyncStateMachinesAsync().ConfigureAwait(false))
                 {
                     actual.Add(entry);
                 }
 
                 Assert.Equal(shouldMatch, actual);
+
+                // check that our example tasks were picked up
+                Assert.Contains(actual, x => x.Description.Contains("<" + nameof(LoadAsyncStateMachinesAsync_IncompleteTaskAsync) + ">"));
+                Assert.Contains(actual, x => x.Description.Contains("<" + nameof(LoadAsyncStateMachinesAsync_IncompleteValueTaskAsync) + ">"));
+                Assert.Contains(actual,
+                    x =>
+                        x.Description.Contains(nameof(LoadAsyncStateMachinesAsync)) &&
+                        !x.Description.Contains("<" + nameof(LoadAsyncStateMachinesAsync_IncompleteTaskAsync) + ">") &&
+                        !x.Description.Contains("<" + nameof(LoadAsyncStateMachinesAsync_IncompleteValueTaskAsync) + ">")
+                );
             }
+
+            completeSignal.Release(3);
+
+            await incompleteTask.ConfigureAwait(false);
+            await incompleteValueTask.ConfigureAwait(false);
+            await incompleteTaskRun.ConfigureAwait(false);
+
+            GC.KeepAlive(incompleteTask);
+            GC.KeepAlive(incompleteTaskRun);
         }
 
-        private static async ValueTask<ImmutableDictionary<string, ImmutableHashSet<long>>> LoadTypeDetailsAsync(AnalyzerProcess analyze)
+        private static async Task<long> LoadAsyncStateMachinesAsync_IncompleteTaskAsync(SemaphoreSlim signal)
         {
-            var ret = ImmutableDictionary.CreateBuilder<string, ImmutableHashSet<long>>();
+            var sw = Stopwatch.StartNew();
+            await signal.WaitAsync();
+
+            return sw.ElapsedTicks;
+        }
+
+        private static async Task<long> LoadAsyncStateMachinesAsync_IncompleteValueTaskAsync(SemaphoreSlim signal)
+        {
+            var sw = Stopwatch.StartNew();
+            await signal.WaitAsync();
+
+            return sw.ElapsedTicks;
+        }
+
+        [Theory]
+        [MemberData(nameof(ArrayPoolParameters))]
+        public async Task LoadObjectInstanceFieldsSpecificsAsync(ArrayPool<char> pool)
+        {
+            using var completeSignal = new SemaphoreSlim(0);
+
+            var incompleteTask = LoadAsyncStateMachinesAsync_IncompleteTaskAsync(completeSignal);
+
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+
+            await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
+            {
+                var stateMachinesBuilder = ImmutableList.CreateBuilder<AsyncStateMachineDetails>();
+                await foreach (var machine in analyze.LoadAsyncStateMachinesAsync().ConfigureAwait(false))
+                {
+                    stateMachinesBuilder.Add(machine);
+                }
+
+                var stateMachines = stateMachinesBuilder.ToImmutable();
+                var target = stateMachines.First(x => x.Description.Contains("<" + nameof(LoadAsyncStateMachinesAsync_IncompleteTaskAsync) + ">"));
+
+                long? eeClass = null;
+
+                var fieldsBuilder = ImmutableList.CreateBuilder<InstanceFieldWithValue>();
+                await foreach (var line in analyze.SendCommand(Command.CreateCommandWithAddress("dumpobj", target.Address)).ConfigureAwait(false))
+                {
+                    var entryStr = line.ToString();
+                    line.Dispose();
+
+                    if (eeClass == null && entryStr.StartsWith("EEClass: "))
+                    {
+                        eeClass = long.Parse(entryStr.Substring(entryStr.LastIndexOf(' ') + 1), NumberStyles.HexNumber);
+                    }
+                    else
+                    {
+                        var match = Regex.Match(entryStr, @"^ (?<methodTable> [0-9a-f]+) \s+ (?<field> \S+) \s+ (?<offset> [0-9a-f]+) \s+ (?<type> \S+) \s+ (?<vt> \S+) \s+ (?<attr> \S+) \s+ (?<value> [0-9a-f]+) \s+ (?<name> \S+) $", RegexOptions.IgnoreCase | RegexOptions.IgnorePatternWhitespace);
+                        if (match.Success)
+                        {
+                            var mt = long.Parse(match.Groups["methodTable"].Value, NumberStyles.HexNumber);
+                            var attr = match.Groups["attr"].Value;
+                            if (attr != "instance")
+                            {
+                                continue;
+                            }
+
+                            var name = match.Groups["name"].Value;
+                            var val = long.Parse(match.Groups["value"].Value, NumberStyles.HexNumber);
+
+                            fieldsBuilder.Add(new InstanceFieldWithValue(new InstanceField(name, mt), val));
+                        }
+                    }
+                }
+                var fields = fieldsBuilder.ToImmutable();
+
+                Assert.NotNull(eeClass);
+                Assert.NotEmpty(fields);
+
+                var actual = await analyze.LoadObjectInstanceFieldsSpecificsAsync(target.Address).ConfigureAwait(false);
+
+                Assert.NotNull(actual);
+
+                Assert.Equal(eeClass.Value, actual.Value.EEClass);
+
+                Assert.Equal(fields.Count, actual.Value.InstanceFields.Count);
+
+                foreach (var actualField in actual.Value.InstanceFields)
+                {
+                    Assert.Contains(actualField, fields);
+                }
+            }
+
+            completeSignal.Release(1);
+            await incompleteTask.ConfigureAwait(false);
+
+            GC.KeepAlive(incompleteTask);
+        }
+
+        private static async ValueTask<ImmutableDictionary<TypeDetails, ImmutableHashSet<long>>> LoadTypeDetailsAsync(AnalyzerProcess analyze)
+        {
+            var ret = ImmutableDictionary.CreateBuilder<TypeDetails, ImmutableHashSet<long>>();
 
             var mts = await analyze.LoadUniqueMethodTablesAsync().ConfigureAwait(false);
 
             foreach (var mt in mts)
             {
-                var name = await analyze.ReadMethodTableTypeNameAsync(mt).ConfigureAwait(false);
+                var details = await analyze.ReadMethodTableTypeDetailsAsync(mt).ConfigureAwait(false);
 
-                if(!ret.TryGetValue(name, out var existing))
+                if (!ret.TryGetValue(details, out var existing))
                 {
-                    ret[name] = existing = ImmutableHashSet<long>.Empty;
+                    ret[details] = existing = ImmutableHashSet<long>.Empty;
                 }
 
-                ret[name] = existing.Add(mt);
+                ret[details] = existing.Add(mt);
             }
 
             return ret.ToImmutable();
