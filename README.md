@@ -40,6 +40,7 @@ DumpDiag performs routine analysis of a dump of a .NET process using `dotnet-dum
  - Counts of strings on the heap, by content
  - Counts of char[]s on the heap, by content
  - Counts deleges on the heap, by backing method
+ - Counts of async state machines, by "backing" method
  - All managed thread call stacks
  - Counts of unique stack frames from managed threads
 
