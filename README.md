@@ -17,12 +17,14 @@ Usage:
   DumpDiag [options]
 
 Options:
-  -ddp, --dotnet-dump-path <dotnet-dump-path>     Path to dotnet-dump executable, will be inferred if omitted [default: ]
+  -ddp, --dotnet-dump-path <dotnet-dump-path>     Path to dotnet-dump executable, will be inferred if omitted [default:
+                                                  C:\Users\kevin\.dotnet\tools\dotnet-dump.exe]
   -df, --dump-file <dump-file>                    Existing full process dump to analyze [default: ]
   -dpid, --dump-process-id <dump-process-id>      Id of .NET process to analyze [default: ]
-  -dp, --degree-parallelism <degree-parallelism>  How many processes to use to analyze the dump [default: <num cores - 1>]
+  -dp, --degree-parallelism <degree-parallelism>  How many processes to use to analyze the dump [default: <num cores -1>]
   -sd, --save-dump-file <save-dump-file>          Used in conjunction with --dump-process-id, saves a new full process dump to the given file [default: ]
   -mc, --min-count <min-count>                    Minimum count of strings, char[], type instances, etc. to include in analysis [default: 1]
+  -mas, --min-async-size <min-async-size>         Minimum size (in bytes) of async state machines to include a field breakdown in analysis [default: 1]
   -rf, --report-file <report-file>                Instead of writing to standard out, saves diagnostic report to the given file [default: ]
   -o, --overwrite                                 Overwrite --report-file and --dump-file if they exist [default: False]
   -q, --quiet                                     Suppress progress updates [default: False]
