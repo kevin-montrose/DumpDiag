@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Buffers;
+using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
@@ -875,7 +876,7 @@ namespace DumpDiag.Impl
                 return false;
             }
 
-            if(!attrStr.Equals(INSTANCE_ATTR_STRING, StringComparison.Ordinal))
+            if (!attrStr.Equals(INSTANCE_ATTR_STRING, StringComparison.Ordinal))
             {
                 field = default;
                 return false;
@@ -904,8 +905,6 @@ namespace DumpDiag.Impl
             field = new InstanceFieldWithValue(new InstanceField(nameStr, mt), value);
             return true;
         }
-
-
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool TryParseInstanceFieldNoValue(ReadOnlySequence<char> sequence, ArrayPool<char> arrayPool, out InstanceField field)
@@ -978,11 +977,580 @@ namespace DumpDiag.Impl
             // get name
             var unread = reader.UnreadSequence;
             var ix = unread.LastIndexOf(' ');
-            
+
             var name = unread.Slice(ix + 1);
             var nameStr = name.AsString(arrayPool);
 
             field = new InstanceField(nameStr, mt);
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseLongs(ReadOnlySequence<char> seq, ImmutableArray<long>.Builder into)
+        {
+            // pattern is: ^ (?<addr> [0-9a-f]+): (?<value> [0-9a-f]+)+ $ 
+
+            var reader = new SequenceReader<char>(seq);
+
+            // handle address
+            if (!reader.TryReadTo(out ReadOnlySequence<char> addr, ':'))
+            {
+                return false;
+            }
+
+            if (!addr.TryParseHexLong(out _))
+            {
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // handle values
+            while (reader.Remaining > 0)
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> valueStr, ' '))
+                {
+                    valueStr = reader.UnreadSequence;
+                    reader.Advance(valueStr.Length);
+                }
+                else
+                {
+                    reader.AdvancePast(' ');
+                }
+
+                if (!valueStr.TryParseHexLong(out var value))
+                {
+                    return false;
+                }
+
+                into.Add(value);
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool IsSectionBreak(ReadOnlySequence<char> seq)
+        {
+            // pattern is: ^ (\-)+ $
+
+            var reader = new SequenceReader<char>(seq);
+
+            reader.AdvancePast('-');
+
+            return reader.UnreadSequence.IsEmpty;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseHeapSegment(ReadOnlySequence<char> seq, out long startAddr, out long sizeBytes)
+        {
+            // pattern is: ^ (?<segment> [0-9a-f]+) \s+ (?<begin> [0-9a-f]+) \s+ (?<allocated> [0-9a-f]+) \s+ (?<committed> [0-9a-f]+) \s+ 0x([0-9a-f]+) \( (?<allocatedSize> \d+) \) \s+ 0x([0-9a-f]+) \( (?<committedSize> \d+) \) $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // skip segment
+            if (!reader.TryReadTo(out ReadOnlySequence<char> segmentStr, ' '))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!segmentStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip begin
+            if (!reader.TryReadTo(out ReadOnlySequence<char> beginStr, ' '))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!beginStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read allocated
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocatedStr, ' '))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!allocatedStr.TryParseHexLong(out startAddr))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip committed
+            if (!reader.TryReadTo(out ReadOnlySequence<char> committedStr, ' '))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!committedStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read allocated size
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocatedZeroStr, 'x'))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (allocatedZeroStr.Length != 1 || !allocatedZeroStr.StartsWith("0", StringComparison.Ordinal))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocSizeHexStr, '('))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!allocSizeHexStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocatedSizeStr, ')'))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!allocatedSizeStr.TryParseDecimalLong(out sizeBytes))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip committed size
+            if (!reader.TryReadTo(out ReadOnlySequence<char> committedZeroStr, 'x'))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (committedZeroStr.Length != 1 || !committedZeroStr.StartsWith("0", StringComparison.Ordinal))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> committedSizeHexStr, '('))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!committedSizeHexStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> committedSizeStr, ')'))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!committedSizeStr.TryParseDecimalLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            return reader.UnreadSequence.IsEmpty;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseGCHandle(ReadOnlySequence<char> seq, ArrayPool<char> arrayPool, out HeapGCHandle gcHandle)
+        {
+            const string PINNED = "Pinned";
+            const string REF_COUNTED = "RefCounted";
+            const string WEAK_SHORT = "WeakShort";
+            const string WEAK_LONG = "WeakLong";
+            const string STRONG = "Strong";
+            const string VARIABLE = "Variable";
+            const string ASYNC_PINNED = "AsyncPinned";
+            const string SIZED_REF = "SizedRef";
+            const string DEPENDENT = "Dependent";
+
+            // pattern is: ^ (?<handle> [a-f0-9]+) \s+ (?<type> \S+) \s+ (?<obj> [a-f0-9]+) \s+ (?<size> \d+) \s+ ((?<refCount> \d+) \s+)? (?<name> .*) $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // read handle
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> handleStr, ' '))
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            if (!handleStr.TryParseHexLong(out var handle))
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read type
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> typeStr, ' '))
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            HeapGCHandle.HandleTypes type;
+            if (typeStr.Equals(PINNED, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.Pinned;
+            }
+            else if (typeStr.Equals(REF_COUNTED, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.RefCounted;
+            }
+            else if (typeStr.Equals(WEAK_SHORT, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.WeakShort;
+            }
+            else if (typeStr.Equals(WEAK_LONG, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.WeakLong;
+            }
+            else if (typeStr.Equals(STRONG, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.Strong;
+            }
+            else if (typeStr.Equals(VARIABLE, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.Variable;
+            }
+            else if (typeStr.Equals(ASYNC_PINNED, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.AsyncPinned;
+            }
+            else if (typeStr.Equals(SIZED_REF, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.SizedRef;
+            }
+            else if (typeStr.Equals(DEPENDENT, StringComparison.Ordinal))
+            {
+                type = HeapGCHandle.HandleTypes.Dependent;
+            }
+            else
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read obj
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> objStr, ' '))
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            if (!objStr.TryParseHexLong(out var obj))
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read size
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> sizeStr, ' '))
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            if (!sizeStr.TryParseDecimalInt(out var size))
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip ref count, if it's present
+            if (reader.UnreadSequence.IsEmpty)
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            var nextChar = reader.UnreadSequence.First.Span[0];
+            if (nextChar >= '0' && nextChar <= '9')
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> refCountStr, ' '))
+                {
+                    gcHandle = default;
+                    return false;
+                }
+
+                if (!refCountStr.TryParseDecimalInt(out _))
+                {
+                    gcHandle = default;
+                    return false;
+                }
+
+                reader.AdvancePast(' ');
+            }
+
+            // read type!
+
+            var objTypeStr = reader.UnreadSequence;
+            if (objTypeStr.IsEmpty)
+            {
+                gcHandle = default;
+                return false;
+            }
+
+            var objType = objTypeStr.AsString(arrayPool);
+
+            gcHandle = new HeapGCHandle(handle, type, obj, objType, size);
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseGCHandleStats(ReadOnlySequence<char> seq, ArrayPool<char> arrayPool, out long methodTable, [NotNullWhen(returnValue: true)] out string? typeName)
+        {
+            // pattern is: ^ (?<mt> [a-f0-9]+) \s+ (?<count> \d+) \s+ (?<size> \d+) \s+ (?<type> .*) $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // read mt
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> mtStr, ' '))
+            {
+                methodTable = 0;
+                typeName = null;
+                return false;
+            }
+
+            if (!mtStr.TryParseHexLong(out methodTable))
+            {
+                methodTable = 0;
+                typeName = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip count
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> countStr, ' '))
+            {
+                methodTable = 0;
+                typeName = null;
+                return false;
+            }
+
+            if (!countStr.TryParseDecimalLong(out _))
+            {
+                methodTable = 0;
+                typeName = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip size
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> sizeStr, ' '))
+            {
+                methodTable = 0;
+                typeName = null;
+                return false;
+            }
+
+            if (!sizeStr.TryParseDecimalLong(out _))
+            {
+                methodTable = 0;
+                typeName = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read type
+
+            var typeStr = reader.UnreadSequence;
+
+            if (typeStr.IsEmpty)
+            {
+                methodTable = 0;
+                typeName = null;
+                return false;
+            }
+
+            typeName = typeStr.AsString(arrayPool);
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseMethodTable(ReadOnlySequence<char> seq, out long mt)
+        {
+            const string METHOD_TABLE_STR = "MethodTable: ";
+
+            // pattern is: ^ MethodTable: (?<mt> [a-f0-9]+) $
+
+            if (!seq.StartsWith(METHOD_TABLE_STR, StringComparison.Ordinal))
+            {
+                mt = 0;
+                return false;
+            }
+
+            var mtStr = seq.Slice(METHOD_TABLE_STR.Length);
+
+            if (!mtStr.TryParseHexLong(out mt))
+            {
+                mt = 0;
+                return false;
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseHeapSpace(ReadOnlySequence<char> seq, out long gen0, out long gen1, out long gen2, out long loh, out long poh)
+        {
+            const string TOTAL = "Total";
+
+            // pattern is: ^ (?<heapName> \S+) \s+ (?<gen0> \d+) \s+ (?<gen1> \d+) \s+ (?<gen2> \d+) \s+ (?<loh> \d+) \s+ (?<poh> \d+)? .* $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // skip heap name
+
+            if(!reader.TryReadTo(out ReadOnlySequence<char> heapName, ' '))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            // total isn't a valid heap
+            if(heapName.Equals(TOTAL, StringComparison.Ordinal))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read gen0
+
+            if(!reader.TryReadTo(out ReadOnlySequence<char> gen0Str, ' '))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            if(!gen0Str.TryParseDecimalLong(out gen0))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read gen1
+
+            if(!reader.TryReadTo(out ReadOnlySequence<char> gen1Str, ' '))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            if(!gen1Str.TryParseDecimalLong(out gen1))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read gen2
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> gen2Str, ' '))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            if (!gen2Str.TryParseDecimalLong(out gen2))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read loh
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> lohStr, ' '))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            if (!lohStr.TryParseDecimalLong(out loh))
+            {
+                gen0 = gen1 = gen2 = loh = poh = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read poh, but optionally
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> pohStr, ' '))
+            {
+                pohStr = reader.UnreadSequence;
+            }
+
+            if (!pohStr.TryParseDecimalLong(out poh))
+            {
+                poh = 0;
+                return true;
+            }
+
+            // we're good, there can be trailing junk
             return true;
         }
     }

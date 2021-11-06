@@ -22,7 +22,9 @@ namespace DumpDiag.Impl
             DeterminingDelegates,
             DelegateDetails,
             Strings,
-            AsyncDetails
+            AsyncDetails,
+            AnalyzingPins,
+            HeapAssignments
         }
 
         private readonly int numProcs;
@@ -32,7 +34,7 @@ namespace DumpDiag.Impl
         private readonly int[] progressCurrent;
 
         private int threadCount;
-        private ImmutableDictionary<TypeDetails, ImmutableHashSet<long>>? typeDetails;
+        internal ImmutableDictionary<TypeDetails, ImmutableHashSet<long>>? typeDetails;
         private ImmutableDictionary<long, TypeDetails>? methodTableToTypeDetails;
         private TypeDetails stringTypeDetails;
         private TypeDetails charArrayTypeDetails;
@@ -44,6 +46,9 @@ namespace DumpDiag.Impl
         private ImmutableArray<ImmutableList<HeapEntry>> liveHeapEntriesByProc;
         private ImmutableArray<ImmutableList<HeapEntry>> deadHeapEntriesByProc;
         private ImmutableList<AsyncStateMachineDetails>? asyncDetails;
+
+        private ImmutableList<HeapDetails>? heapClassifications;
+        private HeapFragmentation? heapFragmentation;
 
         private DumpDiagnoser(int numProcs, IProgress<DumpDiagnoserProgress>? progress)
         {
@@ -98,6 +103,8 @@ namespace DumpDiag.Impl
                     prog = prog.WithThreadDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.ThreadDetails));
                     prog = prog.WithTypeDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.TypeDetails));
                     prog = prog.WithAsyncDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.AsyncDetails));
+                    prog = prog.WithAnalysingPins(CalcPercent(progressCurrent, progressMax, ProgressKind.AnalyzingPins));
+                    prog = prog.WithAnalysingPins(CalcPercent(progressCurrent, progressMax, ProgressKind.HeapAssignments));
 
                     progress?.Report(prog);
                 }
@@ -315,7 +322,7 @@ namespace DumpDiag.Impl
                     typeWithoutGenerics.EndsWith("Callback", StringComparison.Ordinal);
 
                 // arrays end with [,,,,,,] (with one , for each additional dimension; zero , for one dimension arrays)
-                bool IsArray(string name)
+                static bool IsArray(string name)
                 {
                     if (!name.EndsWith("]"))
                     {
@@ -746,29 +753,31 @@ namespace DumpDiag.Impl
                 throw new Exception("Async details not loaded, this shouldn't be possible");
             }
 
-            var addressesByMethodTable =
+            var asyncStateMachineTypes =
                 asyncDetails
-                    .GroupBy(g => g.MethodTable)
-                    .ToImmutableDictionary(t => t.Key, t => t.Select(m => m.Address)
-                    .ToImmutableList());
+                    .Select(a => methodTableToTypeDetails[a.MethodTable])
+                    .Distinct()
+                    .ToImmutableList();
+
+            var stateMachineArgs = await GetGenericTypeParametersAsync(asyncStateMachineTypes).ConfigureAwait(false);
+
+            var paired = asyncDetails.Select(x => (Details: x, GenericArguments: stateMachineArgs[methodTableToTypeDetails[x.MethodTable]])).ToImmutableList();
 
             var byProc =
-                asyncDetails
-                    .Select(t => (t.MethodTable, t.SizeBytes))
-                    .Distinct()
+                paired
                     .Select((t, ix) => (t, ix))
                     .GroupBy(t => t.ix % numProcs)
                     .Select(t => t.Select(x => x.t).ToImmutableList())
                     .ToImmutableList();
 
-            var tasks = new ValueTask<ImmutableList<(long BuilderMethodTable, long StateEEClass, AsyncMachineBreakdown Breakdown)>>[byProc.Count];
+            var tasks = new ValueTask<ImmutableList<AsyncMachineBreakdown>>[byProc.Count];
+            var methodTableToTypeLookup = new ConcurrentDictionary<long, TypeDetails>(methodTableToTypeDetails);
 
-            var methodTableLookup = new ConcurrentDictionary<long, TypeDetails>(methodTableToTypeDetails);
             for (var i = 0; i < tasks.Length; i++)
             {
-                var stateMachineMtsForProc = byProc[i];
+                var machinesForProc = byProc[i];
 
-                tasks[i] = procs.RunWithLeasedAsync(proc => LoadAsyncMachineBreakdownAsync(proc, methodTableLookup, stateMachineMtsForProc, addressesByMethodTable));
+                tasks[i] = procs.RunWithLeasedAsync(proc => LoadAsyncMachineBreakdownAsync(proc, methodTableToTypeDetails, machinesForProc, methodTableToTypeLookup));
             }
 
             var res = await tasks.WhenAll().ConfigureAwait(false);
@@ -776,123 +785,35 @@ namespace DumpDiag.Impl
             var uniques =
                 res
                     .SelectMany(x => x)
-                    .GroupBy(g => (g.BuilderMethodTable, g.StateEEClass))
-                    .Select(x => x.First().Breakdown)
                     .ToImmutableList();
 
             return uniques;
 
-            static async ValueTask<ImmutableList<(long BuilderMethodTable, long StateEEClass, AsyncMachineBreakdown Breakdown)>> LoadAsyncMachineBreakdownAsync(
+            static async ValueTask<ImmutableList<AsyncMachineBreakdown>> LoadAsyncMachineBreakdownAsync(
                 AnalyzerProcess proc,
-                ConcurrentDictionary<long, TypeDetails> methodTableToTypeLookup,
-                ImmutableList<(long MethodTable, int SizeBytes)> stateMachinesToAnalyze,
-                ImmutableDictionary<long, ImmutableList<long>> methodTableToAddressesLookup
+                ImmutableDictionary<long, TypeDetails> typeDetails,
+                ImmutableList<(AsyncStateMachineDetails Details, ImmutableList<TypeDetails> GenericArguments)> forProc,
+                ConcurrentDictionary<long, TypeDetails> methodTableToTypeLookup
             )
             {
-                var ret = ImmutableList.CreateBuilder<(long BuilderMethodTable, long StateEEClass, AsyncMachineBreakdown Breakdown)>();
+                var ret = ImmutableList.CreateBuilder<AsyncMachineBreakdown>();
 
-                foreach (var sm in stateMachinesToAnalyze)
+                foreach (var sm in forProc)
                 {
-                    var sizeDetails = await proc.ReadMethodTableTypeDetailsAsync(sm.MethodTable).ConfigureAwait(false);
-                    var eeClass = await proc.LoadEEClassAsync(sm.MethodTable).ConfigureAwait(false);
-                    var asyncBoxDetails = await proc.LoadEEClassDetailsAsync(eeClass).ConfigureAwait(false);
+                    var builderType = await proc.ReadMethodTableTypeDetailsAsync(sm.Details.MethodTable).ConfigureAwait(false);
+                    var stateMachineClass = await proc.LoadEEClassAsync(sm.GenericArguments[1].MethodTable).ConfigureAwait(false);
 
-                    if (!asyncBoxDetails.InstanceFields.Any(x => x.Name.Contains("StateMachine", StringComparison.InvariantCultureIgnoreCase)))
-                    {
-                        var toWrite = "State: " + string.Join(", ", asyncBoxDetails.InstanceFields);
-                        Console.WriteLine(toWrite);
-                        Debugger.Break();
-                        GC.KeepAlive(toWrite);
-                    }
+                    var asyncBoxDetails = await proc.LoadEEClassDetailsAsync(stateMachineClass).ConfigureAwait(false);
 
-                    var stateMachineField = asyncBoxDetails.InstanceFields.Single(x => x.Name.Contains("StateMachine", StringComparison.InvariantCultureIgnoreCase));
-
-                    var stateMachineSizeDetails = await proc.ReadMethodTableTypeDetailsAsync(stateMachineField.MethodTable).ConfigureAwait(false);
-                    var stateMachineClass = await proc.LoadEEClassAsync(stateMachineField.MethodTable).ConfigureAwait(false);
-                    var stateMachineDetails = await proc.LoadEEClassDetailsAsync(stateMachineClass).ConfigureAwait(false);
-
-                    TypeDetails type;
-                    if (!methodTableToTypeLookup.TryGetValue(sm.MethodTable, out type))
-                    {
-                        type = await proc.ReadMethodTableTypeDetailsAsync(sm.MethodTable).ConfigureAwait(false);
-                        methodTableToTypeLookup[sm.MethodTable] = type;
-                    }
-
-                    if (stateMachineDetails.ClassName != "System.__Canon")
-                    {
-                        // not generic in a way we care about
-                        await AddBreakdownAsync(
-                                proc,
-                                ret,
-                                methodTableToTypeLookup,
-                                type,
-                                sm.MethodTable,
-                                eeClass,
-                                sm.SizeBytes,
-                                stateMachineClass,
-                                stateMachineDetails.InstanceFields
-                            )
-                            .ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        // we need to actually _find_ objects and dump it
-                        var gotOne = false;
-                        foreach (var exampleAddr in methodTableToAddressesLookup[sm.MethodTable])
-                        {
-                            var obj = await proc.LoadObjectInstanceFieldsSpecificsAsync(exampleAddr).ConfigureAwait(false);
-                            if (obj == null)
-                            {
-                                continue;
-                            }
-
-                            foreach (var field in obj.Value.InstanceFields)
-                            {
-                                if (field.InstanceField.Name.Contains("StateMachine", StringComparison.InvariantCultureIgnoreCase))
-                                {
-                                    var stateFields = await proc.LoadObjectInstanceFieldsSpecificsAsync(field.Value).ConfigureAwait(false);
-                                    if (stateFields == null)
-                                    {
-                                        continue;
-                                    }
-
-                                    var justFields = stateFields.Value.InstanceFields.Select(x => x.InstanceField).ToImmutableList();
-                                    if (!justFields.IsEmpty)
-                                    {
-                                        gotOne = true;
-                                        await AddBreakdownAsync(
-                                                proc,
-                                                ret,
-                                                methodTableToTypeLookup,
-                                                type,
-                                                sm.MethodTable,
-                                                eeClass,
-                                                sm.SizeBytes,
-                                                obj.Value.EEClass,
-                                                justFields
-                                            )
-                                            .ConfigureAwait(false);
-                                    }
-                                }
-                            }
-                        }
-
-                        if (!gotOne)
-                        {
-                            await AddBreakdownAsync(
-                                    proc,
-                                    ret,
-                                    methodTableToTypeLookup,
-                                    type,
-                                    sm.MethodTable,
-                                    eeClass,
-                                    sm.SizeBytes,
-                                    -1,
-                                    ImmutableList<InstanceField>.Empty
-                                )
-                                .ConfigureAwait(false);
-                        }
-                    }
+                    await AddBreakdownAsync(
+                            proc,
+                            ret,
+                            methodTableToTypeLookup,
+                            builderType.Value,
+                            sm.Details.SizeBytes,
+                            asyncBoxDetails.InstanceFields
+                        )
+                        .ConfigureAwait(false);
                 }
 
                 return ret.ToImmutable();
@@ -900,36 +821,321 @@ namespace DumpDiag.Impl
 
             static async ValueTask AddBreakdownAsync(
                 AnalyzerProcess proc,
-                ImmutableList<(long BuilderMethodTable, long StateEEClass, AsyncMachineBreakdown Breakdown)>.Builder ret,
+                ImmutableList<AsyncMachineBreakdown>.Builder ret,
                 ConcurrentDictionary<long, TypeDetails> methodTableToTypeLookup,
                 TypeDetails type,
-                long typeMt,
-                long eeClass,
                 int sizeBytes,
-                long stateEEClass,
                 ImmutableList<InstanceField> instanceFields
             )
             {
                 var fields = ImmutableList.CreateBuilder<InstanceFieldWithTypeDetails>();
                 foreach (var field in instanceFields)
                 {
+                    if (field.Name.StartsWith("<>"))
+                    {
+                        // don't report auto generated fields, there's nothing to be done for them
+                        // AND they just clutter stuff up
+                        continue;
+                    }
+
                     var fieldMt = field.MethodTable;
 
                     TypeDetails cached;
-                    if (fieldMt == -1 || fieldMt == 0)
+                    if (fieldMt == 0)
                     {
-                        cached = new TypeDetails("!!UNKNOWN!!");
+                        cached = new TypeDetails("!!UNKNOWN!!", 0);
                     }
                     else if (!methodTableToTypeLookup.TryGetValue(fieldMt, out cached))
                     {
-                        cached = await proc.ReadMethodTableTypeDetailsAsync(fieldMt).ConfigureAwait(false);
+                        var cachedNull = await proc.ReadMethodTableTypeDetailsAsync(fieldMt).ConfigureAwait(false);
+                        if (cachedNull == null)
+                        {
+                            throw new InvalidOperationException($"Couldn't load type details for {fieldMt:X2}");
+                        }
+
+                        cached = cachedNull.Value;
                         methodTableToTypeLookup.TryAdd(fieldMt, cached);
                     }
 
                     fields.Add(new InstanceFieldWithTypeDetails(cached, field));
                 }
 
-                ret.Add((typeMt, stateEEClass, new AsyncMachineBreakdown(type, eeClass, sizeBytes, fields.ToImmutable())));
+                ret.Add(new AsyncMachineBreakdown(type, sizeBytes, fields.ToImmutable()));
+            }
+        }
+
+        internal async ValueTask<ImmutableDictionary<TypeDetails, ImmutableList<TypeDetails>>> GetGenericTypeParametersAsync(IEnumerable<TypeDetails> methodTables)
+        {
+            if (methodTableToTypeDetails == null)
+            {
+                throw new Exception("Type details not loaded, this shouldn't be possible");
+            }
+
+            var byProc =
+                methodTables
+                    .Select((t, ix) => (t, ix % numProcs))
+                    .GroupBy(t => t.Item2)
+                    .Select(g => g.Select(x => x.t).ToImmutableList())
+                    .ToImmutableList();
+
+            var tasks = new ValueTask<ImmutableDictionary<TypeDetails, ImmutableList<TypeDetails>>>[byProc.Count];
+
+            for (var i = 0; i < byProc.Count; i++)
+            {
+                var forProc = byProc[i];
+                var task = procs.RunWithLeasedAsync(proc => LoadGenericTypeParameters(methodTableToTypeDetails, proc, forProc));
+                tasks[i] = task;
+            }
+
+            var res = await tasks.WhenAll().ConfigureAwait(false);
+
+            var ret = res.SelectMany(x => x).ToImmutableDictionary();
+
+            return ret;
+        }
+
+        private static async ValueTask<ImmutableDictionary<TypeDetails, ImmutableList<TypeDetails>>> LoadGenericTypeParameters(
+            ImmutableDictionary<long, TypeDetails> typeDetailsLookup,
+            AnalyzerProcess proc,
+            ImmutableList<TypeDetails> types)
+        {
+            // todo: this for sure does not work in 32-bit
+            // todo: this probably doesn't work in framework (whatever), and needs testing in Core 3.1, and 6
+
+            // if you wanna dig into the runtime code... look at:
+            // https://github.com/dotnet/runtime/blob/509d6c38e6a65131e3d334ce70bdcea816146c5b/src/coreclr/vm/genericdict.h
+            // &
+            // https://github.com/dotnet/runtime/blob/509d6c38e6a65131e3d334ce70bdcea816146c5b/src/coreclr/vm/genericdict.cpp
+
+            // looks like there's a fixed offset (48 or 0x30) to an address, which is per instance info
+            // at a negative -8 offset from that info (-1 long) there's a header that lists:
+            //    - num entries, num type pairs
+            //    - and 4 bytes of padding
+            // this is followed by num entries pointers
+            //    - the very last entry pointer points to a list of method tables
+            //    - there will be num pair method tables, one for each generic argument
+            //
+            // this is all super specific to .NET version
+
+            const int ARG_LIST_ADDR_OFFSET = 0x30;
+            const int POINTER_SIZE = 0x8;
+            const long NUM_ENTRIES_MASK = 0x0FFFF;
+            const long NUM_PAIRS_MASK = 0xFFFF0000;
+
+            var ret = ImmutableDictionary.CreateBuilder<TypeDetails, ImmutableList<TypeDetails>>();
+
+            foreach (var type in types)
+            {
+                var mt = type.MethodTable;
+
+                // address where a pointer to the generic arg list is stored
+                var perInstInfoAddr = mt + ARG_LIST_ADDR_OFFSET;
+                var instInfoAddrs = await proc.ReadLongsAsync(perInstInfoAddr, 1).ConfigureAwait(false);
+
+                // address where header starts
+                var instInfoAddr = instInfoAddrs[0];
+                var headerAddr = instInfoAddr - POINTER_SIZE;
+
+                var headers = await proc.ReadLongsAsync(headerAddr, 1).ConfigureAwait(false);
+                var header = (ulong)(headers[0]) >> 32;
+                var numEntries = (int)(header & NUM_ENTRIES_MASK);
+                var numPairs = (int)(header & NUM_PAIRS_MASK) >> 16;
+
+                var lastEntryAddr = instInfoAddr + (numEntries - 1) * POINTER_SIZE;
+                var entries = await proc.ReadLongsAsync(lastEntryAddr, 1).ConfigureAwait(false);
+                var genArgListAddr = entries[0];
+
+                var argDetails = ImmutableList.CreateBuilder<TypeDetails>();
+
+                var genArgPtrs = await proc.ReadLongsAsync(genArgListAddr, numPairs).ConfigureAwait(false);
+
+                var genArgMtsBuilder = ImmutableArray.CreateBuilder<long>(numPairs);
+
+                // some pointers have low bits set, if that's the case they seem to be indirections
+                // where the next highest address is the desired one
+                foreach(var ptr in genArgPtrs)
+                {
+                    if((ptr & 0x7) == 0)
+                    {
+                        genArgMtsBuilder.Add(ptr);
+                        continue;
+                    }
+
+                    var indirectToAddr = (ptr & ~0x7) + 8;
+
+                    var indirectMt = await proc.ReadLongsAsync(indirectToAddr, 1).ConfigureAwait(false);
+                    genArgMtsBuilder.Add(indirectMt[0]);
+                }
+
+                var genArgMts = genArgMtsBuilder.ToImmutable();
+
+                foreach (var argMt in genArgMts)
+                {
+                    TypeDetails details;
+                    if (!typeDetailsLookup.TryGetValue(argMt, out details))
+                    {
+                        var detailsNull = await proc.ReadMethodTableTypeDetailsAsync(argMt).ConfigureAwait(false);
+                        if (detailsNull == null)
+                        {
+                            throw new InvalidOperationException($"Couldn't determine generic argument for {type}");
+                        }
+
+                        details = detailsNull.Value;
+                    }
+
+                    argDetails.Add(details);
+                }
+
+
+                ret[type] = argDetails.ToImmutable();
+            }
+
+            return ret.ToImmutable();
+        }
+
+        internal async ValueTask<PinAnalysis> LoadPinAnalysisAsync()
+        {
+            if (heapClassifications == null)
+            {
+                throw new Exception("Heap classifications not loaded, this shouldn't be possible");
+            }
+
+            if (methodTableToTypeDetails == null)
+            {
+                throw new Exception("Method table lookup not loaded, this shouldn't be possible");
+            }
+
+            // load pins
+            var pinsRaw = await procs.RunWithLeasedAsync(proc => proc.LoadGCHandlesAsync()).ConfigureAwait(false);
+            SetProgressLimit(ProgressKind.AnalyzingPins, pinsRaw.Count);
+
+            // figure out method tables if we couldn't cheat and infer them
+            var needExtraState = pinsRaw.Where(p => !p.MethodTableInitialized).ToImmutableList();
+
+            var byProc =
+                needExtraState
+                    .Select((t, ix) => (t, ix % numProcs))
+                    .GroupBy(t => t.Item2)
+                    .Select(g => g.Select(x => x.t).ToImmutableList())
+                    .ToImmutableList();
+
+            var tasks = new ValueTask<ImmutableDictionary<long, long>>[byProc.Count];
+
+            for (var i = 0; i < tasks.Length; i++)
+            {
+                var heapGCHandles = byProc[i];
+
+                tasks[i] = procs.RunWithLeasedAsync(proc => LoadMethodTableForHandlesAsync(proc, heapGCHandles));
+            }
+
+            await tasks.WhenAll().ConfigureAwait(false);
+            var lookup = tasks.SelectMany(kv => kv.Result).ToImmutableDictionary();
+
+            var pinsBuilder = ImmutableList.CreateBuilder<HeapGCHandle>();
+            foreach (var pin in pinsRaw)
+            {
+                if (pin.MethodTableInitialized)
+                {
+                    pinsBuilder.Add(pin);
+                    continue;
+                }
+
+                var mt = lookup[pin.HandleAddress];
+                var withMt = pin.SetMethodTable(mt);
+
+                pinsBuilder.Add(withMt);
+            }
+
+            var pins = pinsBuilder.ToImmutable();
+
+            var pinCountsBuilder = ImmutableDictionary.CreateBuilder<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>.Builder>();
+            var asyncPinCountsBuilder = ImmutableDictionary.CreateBuilder<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>.Builder>();
+
+            var pinsHandled = 0;
+
+            foreach (var pin in pins)
+            {
+                pinsHandled++;
+
+                if ((pinsHandled % 100) == 0)
+                {
+                    MadeProgress(ProgressKind.AnalyzingPins, pinsHandled);
+                    pinsHandled = 0;
+                }
+
+                ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>.Builder>.Builder toUsePinCounts;
+
+                if (pin.HandleType == HeapGCHandle.HandleTypes.AsyncPinned)
+                {
+                    toUsePinCounts = asyncPinCountsBuilder;
+                }
+                else if (pin.HandleType == HeapGCHandle.HandleTypes.Pinned)
+                {
+                    toUsePinCounts = pinCountsBuilder;
+                }
+                else
+                {
+                    continue;
+                }
+
+                var he = new HeapEntry(pin.ObjectAddress, pin.MethodTable, pin.Size, true);
+                var classified = DetermineGeneration(heapClassifications, he);
+
+                var pinTypeName = methodTableToTypeDetails[pin.MethodTable].TypeName;
+
+                if (!toUsePinCounts.TryGetValue(classified, out var byTypeName))
+                {
+                    toUsePinCounts[classified] = byTypeName = ImmutableDictionary.CreateBuilder<string, (int Count, long Size)>();
+                }
+
+                if (!byTypeName.TryGetValue(pinTypeName, out var cur))
+                {
+                    byTypeName[pinTypeName] = cur = (0, 0);
+                }
+
+                byTypeName[pinTypeName] = (cur.Count + 1, cur.Size + pin.Size);
+            }
+
+            if (pinsHandled != 0)
+            {
+                MadeProgress(ProgressKind.AnalyzingPins, pinsHandled);
+            }
+
+            var pinCounts = pinCountsBuilder.ToImmutableDictionary(kv => kv.Key, kv => kv.Value.ToImmutable());
+            var asyncCounts = asyncPinCountsBuilder.ToImmutableDictionary(kv => kv.Key, kv => kv.Value.ToImmutable());
+
+            return new PinAnalysis(pinCounts, asyncCounts);
+
+            static HeapDetails.HeapClassification DetermineGeneration(ImmutableList<HeapDetails> details, HeapEntry he)
+            {
+                foreach (var detail in details)
+                {
+                    if (detail.TryClassify(he, out var classification))
+                    {
+                        return classification;
+                    }
+                }
+
+                throw new Exception($"Couldn't classify {he}, shouldn't be possible");
+            }
+
+            static async ValueTask<ImmutableDictionary<long, long>> LoadMethodTableForHandlesAsync(AnalyzerProcess proc, ImmutableList<HeapGCHandle> handles)
+            {
+                var ret = ImmutableDictionary.CreateBuilder<long, long>();
+
+                foreach (var handle in handles)
+                {
+                    var details = await proc.LoadObjectInstanceFieldsSpecificsAsync(handle.ObjectAddress).ConfigureAwait(false);
+
+                    if (details == null)
+                    {
+                        throw new Exception("Failed to load details on object reference, shouldn't be possible");
+                    }
+
+                    ret.Add(handle.HandleAddress, details.Value.MethodTable);
+                }
+
+                return ret.ToImmutable();
             }
         }
 
@@ -948,6 +1154,11 @@ namespace DumpDiag.Impl
             if (asyncDetails == null)
             {
                 throw new Exception("Async details not loaded, this shouldn't be possible");
+            }
+
+            if (heapFragmentation == null)
+            {
+                throw new Exception("Heap fragmentation not determined, this shouldn't be possible");
             }
 
             // load string counts
@@ -969,9 +1180,13 @@ namespace DumpDiag.Impl
             // load thread details in parallel
             var threadDetails = await LoadThreadDetailsAsync().ConfigureAwait(false);
 
+            // load async state machine details in parallel
             var asyncMachineBreakDowns = await GetAsyncMachineBreakdownsAsync().ConfigureAwait(false);
 
-            return new AnalyzeResult(typeTotals, stringCounts, delegateCounts, charCounts, asyncTotals, threadDetails, asyncMachineBreakDowns);
+            // classify pins
+            var pinAnalysis = await LoadPinAnalysisAsync().ConfigureAwait(false);
+
+            return new AnalyzeResult(typeTotals, stringCounts, delegateCounts, charCounts, asyncTotals, threadDetails, asyncMachineBreakDowns, pinAnalysis, heapFragmentation.Value);
 
             // all of this is in memory
             static ImmutableDictionary<TypeDetails, ReferenceStats> GetTypeTotals(
@@ -1032,7 +1247,7 @@ namespace DumpDiag.Impl
                         .GroupBy(d => d.MethodTable)
                         .ToImmutableDictionary(
                             g => g.Key,
-                            g => new TypeDetails(InferBackingMethodName(g.First().Description))
+                            g => new TypeDetails(InferBackingMethodName(g.First().Description), g.Key)
                         );
 
                 var asyncTotals = ImmutableDictionary.CreateBuilder<TypeDetails, ReferenceStats>();
@@ -1174,7 +1389,7 @@ namespace DumpDiag.Impl
                     .GroupBy(t => t.ix % numProcs)
                     .Select(t => t.Select(t => t.mt).ToImmutableList())
                     .ToImmutableList();
-            var mtNamesTasks = new ValueTask<ImmutableList<(TypeDetails TypeDetails, long MethodTable)>>[mtsByProc.Count];
+            var mtNamesTasks = new ValueTask<ImmutableList<TypeDetails>>[mtsByProc.Count];
             for (var i = 0; i < mtsByProc.Count; i++)
             {
                 var forTask = mtsByProc[i];
@@ -1182,7 +1397,7 @@ namespace DumpDiag.Impl
                     procs.RunWithLeasedAsync(
                         async proc =>
                         {
-                            var ret = ImmutableList.CreateBuilder<(TypeDetails TypeDetails, long MethodTable)>();
+                            var ret = ImmutableList.CreateBuilder<TypeDetails>();
 
                             var soFar = 0;
 
@@ -1197,7 +1412,12 @@ namespace DumpDiag.Impl
                                 }
 
                                 var name = await proc.ReadMethodTableTypeDetailsAsync(mt).ConfigureAwait(false);
-                                ret.Add((name, mt));
+                                if (name == null)
+                                {
+                                    throw new InvalidOperationException($"Couldn't load type details for {mt:X2}");
+                                }
+
+                                ret.Add(name.Value);
                             }
 
                             if (soFar != 0)
@@ -1217,9 +1437,9 @@ namespace DumpDiag.Impl
             var ret =
                 allRes
                     .SelectMany(t => t)
-                    .GroupBy(t => t.TypeDetails)
+                    .GroupBy(t => t.TypeName)
                     .ToImmutableDictionary(
-                        g => g.Key,
+                        g => g.First(),
                         g => g.Select(t => t.MethodTable).ToImmutableHashSet()
                     );
 
@@ -1293,6 +1513,24 @@ namespace DumpDiag.Impl
             );
         }
 
+        private ValueTask<(ImmutableList<HeapDetails> Classifications, HeapFragmentation Fragementation)> LoadHeapClassificationsAsync()
+        {
+            SetProgressLimit(ProgressKind.HeapAssignments, 2);
+
+            return procs.RunWithLeasedAsync(
+                async proc =>
+                {
+                    var classification = await proc.LoadHeapDetailsAsync().ConfigureAwait(false);
+                    MadeProgress(ProgressKind.HeapAssignments, 1);
+
+                    var fragmentation = await proc.LoadHeapFragmentationAsync().ConfigureAwait(false);
+                    MadeProgress(ProgressKind.HeapAssignments, 1);
+
+                    return (classification, fragmentation);
+                }
+            );
+        }
+
         private async ValueTask LoadNeededStateAsync()
         {
             // load thread counts
@@ -1331,10 +1569,13 @@ namespace DumpDiag.Impl
             var stringHeapEntry = liveHeapEntries.First(x => stringTypeMethodTable == x.MethodTable);
             var stringDetailsTask = LoadStringDetailsAsync(stringHeapEntry);
 
+            var loadHeapClassificationTask = LoadHeapClassificationsAsync();
+
             // wait for everything that remains
             deadHeapEntries = await deadHeapTask.ConfigureAwait(false);
             threadCount = await threadCountTask.ConfigureAwait(false);
             stringDetails = await stringDetailsTask.ConfigureAwait(false);
+            (heapClassifications, heapFragmentation) = await loadHeapClassificationTask.ConfigureAwait(false);
         }
 
         internal static async ValueTask<DumpDiagnoser> CreateAsync(string dotnetDump, string dumpPath, int processCount, IProgress<DumpDiagnoserProgress>? progress = null)

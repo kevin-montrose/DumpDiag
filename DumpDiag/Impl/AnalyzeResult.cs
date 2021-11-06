@@ -17,6 +17,8 @@ namespace DumpDiag.Impl
         internal ImmutableDictionary<TypeDetails, ReferenceStats> AsyncStateMatchineStats { get; }
         internal ThreadAnalysis ThreadDetails { get; }
         internal ImmutableList<AsyncMachineBreakdown> AsyncStateMachineBreakdown { get; }
+        internal PinAnalysis PinAnalysis { get; }
+        internal HeapFragmentation HeapFragmentation { get; }
 
         internal AnalyzeResult(
             ImmutableDictionary<TypeDetails, ReferenceStats> typeReferenceStats,
@@ -25,7 +27,9 @@ namespace DumpDiag.Impl
             ImmutableDictionary<string, ReferenceStats> characterArrayReferenceStats,
             ImmutableDictionary<TypeDetails, ReferenceStats> asyncStateMatchineStats,
             ThreadAnalysis threadDetails,
-            ImmutableList<AsyncMachineBreakdown> asyncStateMachineBreakdown
+            ImmutableList<AsyncMachineBreakdown> asyncStateMachineBreakdown,
+            PinAnalysis pinAnalysis,
+            HeapFragmentation heapFragmentation
         )
         {
             TypeReferenceStats = typeReferenceStats;
@@ -35,6 +39,8 @@ namespace DumpDiag.Impl
             AsyncStateMatchineStats = asyncStateMatchineStats;
             ThreadDetails = threadDetails;
             AsyncStateMachineBreakdown = asyncStateMachineBreakdown;
+            PinAnalysis = pinAnalysis;
+            HeapFragmentation = heapFragmentation;
         }
 
         public override string ToString()
@@ -89,6 +95,169 @@ namespace DumpDiag.Impl
             await writer.WriteLineAsync().ConfigureAwait(false);
 
             await WriteCallStacksAsync(writer, ThreadDetails).ConfigureAwait(false);
+
+            await writer.WriteLineAsync().ConfigureAwait(false);
+            await writer.WriteLineAsync().ConfigureAwait(false);
+
+            await WriteHeapFragmentationAsync(writer, HeapFragmentation).ConfigureAwait(false);
+
+            await writer.WriteLineAsync().ConfigureAwait(false);
+            await writer.WriteLineAsync().ConfigureAwait(false);
+
+            await WritePinAnalysisAsync(writer, PinAnalysis).ConfigureAwait(false);
+
+            static async ValueTask WriteHeapFragmentationAsync(TextWriter writer, HeapFragmentation frag)
+            {
+                var rowsBuilder = ImmutableList.CreateBuilder<(string Heap, long SizeBytes, long FreeBytes, double FragmentationPercent)>();
+
+                rowsBuilder.AddRange(
+                    new[]
+                    {
+                        (Heap: "Gen0", SizeBytes: frag.Gen0Size, FreeBytes: frag.Gen0Free, FragmentationPercent: frag.Gen0FragementationPercent),
+                        (Heap: "Gen1", SizeBytes: frag.Gen1Size, FreeBytes: frag.Gen1Free, FragmentationPercent: frag.Gen1FragementationPercent),
+                        (Heap: "Gen2", SizeBytes: frag.Gen2Size, FreeBytes: frag.Gen2Free, FragmentationPercent: frag.Gen2FragementationPercent),
+                        (Heap: "LargeObject", SizeBytes: frag.LOHSize, FreeBytes: frag.LOHFree, FragmentationPercent: frag.LOHFragementationPercent)
+                    }
+                );
+
+                if (frag.POHSize > 0)
+                {
+                    rowsBuilder.Add(
+                        (Heap: "PinnedObject", SizeBytes: frag.POHSize, FreeBytes: frag.POHFree, FragmentationPercent: frag.POHFragementationPercent)
+                    );
+                }
+
+                var rows = rowsBuilder.ToImmutable();
+
+                var maxGenSize = rows.Max(m => m.Heap.Length);
+                var maxFreeSize = rows.Max(m => m.FreeBytes).ToString("N0").Length;
+                var maxSizeSize = rows.Max(m => m.SizeBytes).ToString("N0").Length;
+                var maxFragSize = rows.Max(m => $"{m.FragmentationPercent:N1}%".Length);
+
+                var genSize = Math.Max(maxGenSize, "Type".Length);
+                var freeSize = Math.Max(maxFreeSize, "Free Bytes".Length);
+                var sizeSize = Math.Max(maxSizeSize, "Size Bytes".Length);
+                var fragSize = Math.Max(maxFragSize, "Fragmentation %".Length);
+
+                await writer.WriteLineAsync("Heap Fragmentation").ConfigureAwait(false);
+                await writer.WriteLineAsync(new string('=', "Heap Fragmentation".Length)).ConfigureAwait(false);
+                await writer.WriteLineAsync().ConfigureAwait(false);
+
+                await WritePartAsync(writer, "Type", genSize).ConfigureAwait(false);
+                await writer.WriteAsync("   ").ConfigureAwait(false);
+                await WritePartAsync(writer, "Size Bytes", sizeSize).ConfigureAwait(false);
+                await writer.WriteAsync("   ").ConfigureAwait(false);
+                await WritePartAsync(writer, "Free Bytes", freeSize).ConfigureAwait(false);
+                await writer.WriteAsync("   ").ConfigureAwait(false);
+                await WritePartAsync(writer, "Fragmentation %", fragSize).ConfigureAwait(false);
+                await writer.WriteLineAsync().ConfigureAwait(false);
+                await writer.WriteLineAsync(new string('-', genSize + sizeSize + freeSize + fragSize + 3 * 3)).ConfigureAwait(false);
+
+                var inOrder =
+                    rows
+                        .OrderByDescending(x => x.FragmentationPercent)
+                        .ThenBy(x => x.Heap)
+                        .ThenByDescending(x => x.SizeBytes)
+                        .ThenByDescending(x => x.FreeBytes);
+
+                foreach (var row in inOrder)
+                {
+                    await WritePartAsync(writer, row.Heap, genSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+
+                    await WritePartAsync(writer, $"{row.SizeBytes:N0}", sizeSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+
+                    await WritePartAsync(writer, $"{row.FreeBytes:N0}", freeSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+
+                    await WritePartAsync(writer, $"{row.FragmentationPercent:N1}%", sizeSize).ConfigureAwait(false);
+                    await writer.WriteLineAsync().ConfigureAwait(false);
+                }
+            }
+
+            static async ValueTask WritePinAnalysisAsync(TextWriter writer, PinAnalysis pins)
+            {
+                if (pins.AsyncPins.Count == 0 && pins.Pins.Count == 0)
+                {
+                    return;
+                }
+
+                var wroteAsyncPins = await WriteSectionAsync(writer, "Async Pins", pins.AsyncPins, false).ConfigureAwait(false);
+
+                await WriteSectionAsync(writer, "Explicit Pins", pins.Pins, wroteAsyncPins).ConfigureAwait(false);
+
+                static async ValueTask<bool> WriteSectionAsync(
+                    TextWriter writer,
+                    string sectionName,
+                    ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>> section,
+                    bool needsSpacer
+                )
+                {
+                    if (section.Count == 0)
+                    {
+                        return false;
+                    }
+
+                    if (needsSpacer)
+                    {
+                        await writer.WriteLineAsync().ConfigureAwait(false);
+                    }
+
+                    await writer.WriteLineAsync(sectionName).ConfigureAwait(false);
+                    await writer.WriteLineAsync(new string('=', sectionName.Length)).ConfigureAwait(false);
+
+                    var maxTypeName = section.Max(kv => kv.Value.Max(x => x.Key.Length));
+                    var maxClassification = section.Max(kv => kv.Key.ToString().Length);
+                    var maxCountPlusBytes = section.Max(kv => kv.Value.Max(v => $"{v.Value.Count:N0}({v.Value.Size:N0})".Length));
+
+                    var typeNameSize = Math.Max(maxTypeName, "Type".Length);
+                    var heapSize = Math.Max(maxClassification, "Location".Length);
+                    var countPlusBytesSize = Math.Max(maxClassification, "Count(bytes)".Length);
+
+                    await WritePartAsync(writer, "Type", typeNameSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+                    await WritePartAsync(writer, "Location", heapSize).ConfigureAwait(false);
+                    await writer.WriteAsync("   ").ConfigureAwait(false);
+                    await WritePartAsync(writer, "Count(bytes)", countPlusBytesSize).ConfigureAwait(false);
+                    await writer.WriteLineAsync().ConfigureAwait(false);
+                    await writer.WriteLineAsync(new string('-', typeNameSize + heapSize + countPlusBytesSize + 2 * 3)).ConfigureAwait(false);
+
+                    var rows =
+                        section
+                            .SelectMany(
+                                kv =>
+                                    kv.Value.Select(
+                                        x =>
+                                            (
+                                                Type: x.Key,
+                                                Heap: kv.Key,
+                                                Count: x.Value.Count,
+                                                Size: x.Value.Size
+                                            )
+                                    )
+                            )
+                            .OrderByDescending(x => x.Size)
+                            .ThenByDescending(x => x.Count)
+                            .ThenBy(x => x.Type)
+                            .ThenBy(x => x.Heap);
+
+                    foreach (var row in rows)
+                    {
+                        await WritePartAsync(writer, row.Type, typeNameSize).ConfigureAwait(false);
+                        await writer.WriteAsync("   ").ConfigureAwait(false);
+
+                        await WritePartAsync(writer, row.Heap.ToString(), heapSize).ConfigureAwait(false);
+                        await writer.WriteAsync("   ").ConfigureAwait(false);
+
+                        await WritePartAsync(writer, $"{row.Count:N0}({row.Size:N0})", countPlusBytesSize).ConfigureAwait(false);
+
+                        await writer.WriteLineAsync().ConfigureAwait(false);
+                    }
+
+                    return true;
+                }
+            }
 
             static async ValueTask WriteAsyncMachineDetailsAsync(TextWriter writer, ImmutableList<AsyncMachineBreakdown> breakdowns, int cutoffBytes)
             {

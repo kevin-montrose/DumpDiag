@@ -67,7 +67,7 @@ namespace DumpDiag
                 );
             var minAsyncSizeOption =
                 new Option<int>(
-                    new [] { "-mas", "--min-async-size" },
+                    new[] { "-mas", "--min-async-size" },
                     getDefaultValue: () => 1,
                     description: "Minimum size (in bytes) of async state machines to include a field breakdown in analysis"
                 );
@@ -398,6 +398,16 @@ namespace DumpDiag
                 if (progress.PercentAsyncDetails > 0 && progress.PercentAsyncDetails < 100)
                 {
                     parts.Add($"async details: {progress.PercentAsyncDetails}%");
+                }
+
+                if (progress.PercentHeapAssignments > 0 && progress.PercentHeapAssignments < 100)
+                {
+                    parts.Add($"heap assignments: {progress.PercentHeapAssignments}%");
+                }
+
+                if (progress.PercentAnalyzingPins > 0 && progress.PercentAnalyzingPins < 100)
+                {
+                    parts.Add($"pins: {progress.PercentAnalyzingPins}%");
                 }
 
                 if (parts.Count == 0)

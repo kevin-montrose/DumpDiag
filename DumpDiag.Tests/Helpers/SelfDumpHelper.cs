@@ -47,13 +47,12 @@ namespace DumpDiag.Tests.Helpers
         public ValueTask DisposeAsync()
         => AttemptDeleteAsync(DumpFile);
         
-
         internal static async ValueTask<SelfDumpHelper> TakeSelfDumpAsync()
         {
-            Assert.True(DotNetToolFinder.TryFind("dotnet-dump", out var path, out _));
-
             using var curProc = Process.GetCurrentProcess();
+
             var pid = curProc.Id;
+            Assert.True(DotNetToolFinder.TryFind("dotnet-dump", out var path, out _));
 
             var dumpFile = Path.GetTempFileName();
             File.Delete(dumpFile);

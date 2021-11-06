@@ -6,9 +6,8 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
-using System.IO;
 using System.Linq;
-using System.Text;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +17,13 @@ namespace DumpDiag.Tests
 {
     internal delegate void WellKnownDelegate(string x, int y);
 
+    [CollectionDefinition(nameof(MustRunInIsolationTestCollection), DisableParallelization = true)]
+    public class MustRunInIsolationTestCollection { }
+
+    // because we care a lot about the state of _this specific process_ we only want to run code in this class
+    // any other tests shouldn't run at the same time, so we can muck about with process state without worrying about
+    // conflicts
+    [Collection(nameof(MustRunInIsolationTestCollection))]
     public class AnalyzerProcessTests : IDisposable
     {
         // todo: de-dupe
@@ -36,6 +42,8 @@ namespace DumpDiag.Tests
                 return ret;
             }
         }
+
+        public object GCHAndle { get; private set; }
 
         public void Dispose()
         {
@@ -665,6 +673,493 @@ namespace DumpDiag.Tests
             GC.KeepAlive(incompleteTask);
         }
 
+        private readonly struct LoadHeapDetailsAsync_SpecialValue
+        {
+            internal Guid Id { get; }
+
+            internal LoadHeapDetailsAsync_SpecialValue(Guid id)
+            {
+                Id = id;
+            }
+
+            public override string ToString()
+            => Id.ToString();
+        }
+
+        [Theory]
+        [MemberData(nameof(ArrayPoolParameters))]
+        public async Task LoadHeapDetailsAsync(ArrayPool<char> pool)
+        {
+            // pfffft, I do not love this but it's probably the best option I've got to force allocations?
+            var pinnedVal = GC.AllocateArray<LoadHeapDetailsAsync_SpecialValue>(1, pinned: true);
+            pinnedVal[0] = new LoadHeapDetailsAsync_SpecialValue(Guid.NewGuid());
+
+            // LOH takes anything over 85_000 bytes by default, this should be way more than enough
+            var lohVal = new LoadHeapDetailsAsync_SpecialValue[100_000];
+            lohVal[0] = new LoadHeapDetailsAsync_SpecialValue(Guid.NewGuid());
+
+            var gen2Val = new LoadHeapDetailsAsync_SpecialValue[] { new LoadHeapDetailsAsync_SpecialValue(Guid.NewGuid()) };
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            var gen1Val = new LoadHeapDetailsAsync_SpecialValue[] { new LoadHeapDetailsAsync_SpecialValue(Guid.NewGuid()) };
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            var gen0Val = new LoadHeapDetailsAsync_SpecialValue[] { new LoadHeapDetailsAsync_SpecialValue(Guid.NewGuid()) };
+
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+
+            await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
+            {
+                var heapStatLinesBuilder = ImmutableList.CreateBuilder<string>();
+
+                await foreach (var line in analyze.SendCommand(Command.CreateCommand("eeheap -gc")).ConfigureAwait(false))
+                {
+                    heapStatLinesBuilder.Add(line.ToString());
+
+                    line.Dispose();
+                }
+
+                var heapStatLines = heapStatLinesBuilder.ToImmutable();
+                var rawDetailsBuilder = ImmutableList.CreateBuilder<HeapDetails>();
+                {
+
+                    var started = false;
+                    long? gen0 = null;
+                    long? gen1 = null;
+                    long? gen2 = null;
+
+                    string curSegments = null;
+                    var sohSegments = ImmutableArray.CreateBuilder<HeapDetailsBuilder.HeapSegment>();
+                    var lohSegments = ImmutableArray.CreateBuilder<HeapDetailsBuilder.HeapSegment>();
+                    var pohSegments = ImmutableArray.CreateBuilder<HeapDetailsBuilder.HeapSegment>();
+                    foreach (var line in heapStatLines)
+                    {
+                        if (line.StartsWith("generation 0"))
+                        {
+                            Assert.False(started);
+                            Assert.Null(gen0);
+                            var part = line.Substring(line.LastIndexOf('x') + 1);
+                            gen0 = long.Parse(part, NumberStyles.HexNumber);
+
+                            started = true;
+                        }
+
+                        if (line.StartsWith("generation 1"))
+                        {
+                            Assert.True(started);
+                            Assert.Null(gen1);
+                            var part = line.Substring(line.LastIndexOf('x') + 1);
+                            gen1 = long.Parse(part, NumberStyles.HexNumber);
+                        }
+
+                        if (line.StartsWith("generation 2"))
+                        {
+                            Assert.True(started);
+                            Assert.Null(gen2);
+                            var part = line.Substring(line.LastIndexOf('x') + 1);
+                            gen2 = long.Parse(part, NumberStyles.HexNumber);
+
+                            curSegments = "SOH";
+                        }
+
+                        if (line.StartsWith("Large object heap"))
+                        {
+                            Assert.NotNull(curSegments);
+                            curSegments = "LOH";
+                        }
+
+                        if (line.StartsWith("Pinned object heap"))
+                        {
+                            Assert.NotNull(curSegments);
+                            curSegments = "POH";
+                        }
+
+                        var match =
+                            Regex.Match(
+                                line,
+                                @"^ (?<segment> [0-9a-f]+) \s+ (?<begin> [0-9a-f]+) \s+ (?<allocated> [0-9a-f]+) \s+ (?<committed> [0-9a-f]+) \s+ 0x([0-9a-f]+) \( (?<allocatedSize> \d+) \) \s+ 0x([0-9a-f]+) \( (?<committedSize> \d+) \) $",
+                                RegexOptions.IgnoreCase | RegexOptions.IgnorePatternWhitespace
+                            );
+
+                        if (match.Success)
+                        {
+                            Assert.True(started);
+
+                            var start = long.Parse(match.Groups["allocated"].Value, NumberStyles.HexNumber);
+                            var size = long.Parse(match.Groups["allocatedSize"].Value);
+
+                            switch (curSegments)
+                            {
+                                case "SOH": sohSegments.Add(new HeapDetailsBuilder.HeapSegment(start, size)); break;
+                                case "LOH": lohSegments.Add(new HeapDetailsBuilder.HeapSegment(start, size)); break;
+                                case "POH": pohSegments.Add(new HeapDetailsBuilder.HeapSegment(start, size)); break;
+                                default: throw new InvalidOperationException();
+                            }
+                        }
+
+                        if (started && line.All(c => c == '-'))
+                        {
+                            rawDetailsBuilder.Add(
+                                new HeapDetails(
+                                    rawDetailsBuilder.Count,
+                                    gen0.Value,
+                                    gen1.Value,
+                                    gen2.Value,
+                                    sohSegments.ToImmutable(),
+                                    lohSegments.ToImmutable(),
+                                    pohSegments.ToImmutable()
+                                )
+                            );
+
+                            sohSegments.Clear();
+                            lohSegments.Clear();
+                            pohSegments.Clear();
+
+                            gen0 = gen1 = gen2 = null;
+                            curSegments = null;
+
+                            started = false;
+                        }
+                    }
+
+                    if (started)
+                    {
+                        rawDetailsBuilder.Add(
+                            new HeapDetails(
+                                rawDetailsBuilder.Count,
+                                gen0.Value,
+                                gen1.Value,
+                                gen2.Value,
+                                sohSegments.ToImmutable(),
+                                lohSegments.ToImmutable(),
+                                pohSegments.ToImmutable()
+                            )
+                        );
+                    }
+                }
+                var rawDetails = rawDetailsBuilder.ToImmutable();
+
+                var details = await analyze.LoadHeapDetailsAsync().ConfigureAwait(false);
+
+                Assert.Equal(rawDetails, details);
+
+                var heapEntriesBuilder = ImmutableList.CreateBuilder<HeapEntry>();
+                await foreach (var heapEntry in analyze.LoadHeapAsync(LoadHeapMode.Live).ConfigureAwait(false))
+                {
+                    heapEntriesBuilder.Add(heapEntry);
+                }
+                var heapEntries = heapEntriesBuilder.ToImmutable();
+
+                var typeDetails = await LoadTypeDetailsAsync(analyze).ConfigureAwait(false);
+
+                var specialValueType = typeDetails.Single(kv => kv.Key.TypeName == typeof(LoadHeapDetailsAsync_SpecialValue[]).FullName);
+                var specialValueTypeHeapEntries = heapEntries.Where(he => specialValueType.Value.Contains(he.MethodTable)).ToImmutableList();
+
+                // figure out which HeapEntry corresponds to which array
+                var pinnedBytes = pinnedVal[0].Id.ToByteArray();
+                var lohBytes = lohVal[0].Id.ToByteArray();
+                var gen2Bytes = gen2Val[0].Id.ToByteArray();
+                var gen1Bytes = gen1Val[0].Id.ToByteArray();
+                var gen0Bytes = gen0Val[0].Id.ToByteArray();
+
+                HeapEntry? pinnedHe;
+                HeapEntry? lohHe;
+                HeapEntry? gen2He;
+                HeapEntry? gen1He;
+                HeapEntry? gen0He;
+
+                pinnedHe = lohHe = gen2He = gen1He = gen0He = null;
+
+                foreach (var he in specialValueTypeHeapEntries)
+                {
+                    var arr = await analyze.ReadArrayDetailsAsync(he).ConfigureAwait(false);
+
+                    if (arr.FirstElementAddress == null)
+                    {
+                        continue;
+                    }
+
+                    // the only thing in LoadHeapDetailsAsync_SpecialValue is a guid, so this should give us that field
+                    var guidLongs = await analyze.ReadLongsAsync(arr.FirstElementAddress.Value, 16 / sizeof(long)).ConfigureAwait(false);
+                    var guidBytes = guidLongs.SelectMany(g => BitConverter.GetBytes(g)).ToArray();
+
+                    if (guidBytes.SequenceEqual(lohBytes))
+                    {
+                        Assert.Null(lohHe);
+                        lohHe = he;
+                    }
+                    else if (guidBytes.SequenceEqual(pinnedBytes))
+                    {
+                        Assert.Null(pinnedHe);
+                        pinnedHe = he;
+                    }
+                    else if (guidBytes.SequenceEqual(gen2Bytes))
+                    {
+                        Assert.Null(gen2He);
+                        gen2He = he;
+                    }
+                    else if (guidBytes.SequenceEqual(gen1Bytes))
+                    {
+                        Assert.Null(gen1He);
+                        gen1He = he;
+                    }
+                    else if (guidBytes.SequenceEqual(gen0Bytes))
+                    {
+                        Assert.Null(gen0He);
+                        gen0He = he;
+                    }
+                }
+
+                Assert.NotNull(pinnedHe);
+                Assert.NotNull(lohHe);
+                Assert.NotNull(gen2He);
+                Assert.NotNull(gen1He);
+                Assert.NotNull(gen0He);
+
+                // check that heap entries correspond to expected heap segments
+                var pinnedHeap = DetermineGeneration(details, pinnedHe.Value);
+                Assert.Equal(HeapDetails.HeapClassification.PinnedObjectHeap, pinnedHeap);
+
+                var lohHeap = DetermineGeneration(details, lohHe.Value);
+                Assert.Equal(HeapDetails.HeapClassification.LargeObjectHeap, lohHeap);
+
+                var gen2Heap = DetermineGeneration(details, gen2He.Value);
+                Assert.Equal(HeapDetails.HeapClassification.Generation2, gen2Heap);
+
+                var gen1Heap = DetermineGeneration(details, gen1He.Value);
+                Assert.Equal(HeapDetails.HeapClassification.Generation1, gen1Heap);
+
+                var gen0Heap = DetermineGeneration(details, gen0He.Value);
+                Assert.Equal(HeapDetails.HeapClassification.Generation0, gen0Heap);
+
+                // make sure we can classify everything that's _LIVE_ on the heap
+                foreach (var he in heapEntries)
+                {
+                    DetermineGeneration(details, he);
+                }
+            }
+
+            GC.KeepAlive(pinnedVal);
+            GC.KeepAlive(gen2Val);
+            GC.KeepAlive(gen1Val);
+            GC.KeepAlive(gen0Val);
+
+            static HeapDetails.HeapClassification DetermineGeneration(ImmutableList<HeapDetails> details, HeapEntry he)
+            {
+                foreach (var detail in details)
+                {
+                    if (detail.TryClassify(he, out var classification))
+                    {
+                        return classification;
+                    }
+                }
+
+                throw new Exception($"Couldn't classify {he}");
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ArrayPoolParameters))]
+        public async Task LoadGCHandlesAsync(ArrayPool<char> pool)
+        {
+            var pinned = new byte[4];
+            var pinnedHandle = GCHandle.Alloc(pinned, GCHandleType.Pinned);
+
+            var weak = new byte[4];
+            var weakHandle = GCHandle.Alloc(pinned, GCHandleType.Weak);
+
+            var weakRes = new byte[4];
+            var weakResHandle = new WeakReference<byte[]>(weakRes, trackResurrection: true);
+
+            var normal = new byte[4];
+            var normalHandle = GCHandle.Alloc(pinned, GCHandleType.Normal);
+
+            // todo: dependent handle, needs .NET 6+
+
+            try
+            {
+                await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+
+                await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
+                {
+                    var handlesManualRawBuilder = ImmutableList.CreateBuilder<HeapGCHandle>();
+                    await foreach (var line in analyze.SendCommand(Command.CreateCommand("gchandles")).ConfigureAwait(false))
+                    {
+                        var lineStr = line.ToString();
+                        line.Dispose();
+
+                        var match = Regex.Match(lineStr, @"^ (?<handle> [a-f0-9]+) \s+ (?<type> \S+) \s+ (?<obj> [a-f0-9]+) \s+ (?<size> \d+) \s+ ((?<refCount> \d+) \s+)? (?<name> .*) $", RegexOptions.IgnoreCase | RegexOptions.IgnorePatternWhitespace);
+                        if (!match.Success)
+                        {
+                            continue;
+                        }
+
+                        var handle = long.Parse(match.Groups["handle"].Value, NumberStyles.HexNumber);
+                        var typeStr = match.Groups["type"].Value;
+                        var obj = long.Parse(match.Groups["obj"].Value, NumberStyles.HexNumber);
+                        var size = int.Parse(match.Groups["size"].Value);
+                        var name = match.Groups["name"].Value;
+
+                        HeapGCHandle.HandleTypes handleType;
+                        if (typeStr.Equals("Pinned", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.Pinned;
+                        }
+                        else if (typeStr.Equals("RefCounted", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.RefCounted;
+                        }
+                        else if (typeStr.Equals("WeakShort", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.WeakShort;
+                        }
+                        else if (typeStr.Equals("WeakLong", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.WeakLong;
+                        }
+                        else if (typeStr.Equals("Strong", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.Strong;
+                        }
+                        else if (typeStr.Equals("Variable", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.Variable;
+                        }
+                        else if (typeStr.Equals("AsyncPinned", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.AsyncPinned;
+                        }
+                        else if (typeStr.Equals("SizeRef", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.SizedRef;
+                        }
+                        else if (typeStr.Equals("Dependent", StringComparison.Ordinal))
+                        {
+                            handleType = HeapGCHandle.HandleTypes.Dependent;
+                        }
+                        else
+                        {
+                            throw new Exception($"Unexpected gc handle type: {typeStr}");
+                        }
+
+                        handlesManualRawBuilder.Add(new HeapGCHandle(handle, handleType, obj, name, size));
+                    }
+                    var handlesManualRaw = handlesManualRawBuilder.ToImmutable();
+
+                    var handlesRaw = await analyze.LoadGCHandlesAsync().ConfigureAwait(false);
+
+                    var handlesManual = await LoadMethodTablesWhereNeededAsync(analyze, handlesManualRaw).ConfigureAwait(false);
+                    var handles = await LoadMethodTablesWhereNeededAsync(analyze, handlesRaw).ConfigureAwait(false);
+
+                    Assert.Equal(handlesManual, handles);
+                }
+            }
+            finally
+            {
+                pinnedHandle.Free();
+                weakHandle.Free();
+                normalHandle.Free();
+            }
+
+            GC.KeepAlive(pinned);
+            GC.KeepAlive(weakRes);
+            GC.KeepAlive(weakResHandle);
+            GC.KeepAlive(weak);
+            GC.KeepAlive(normal);
+
+            static async ValueTask<ImmutableList<HeapGCHandle>> LoadMethodTablesWhereNeededAsync(AnalyzerProcess proc, ImmutableList<HeapGCHandle> loaded)
+            {
+                var ret = ImmutableList.CreateBuilder<HeapGCHandle>();
+
+                foreach (var handle in loaded)
+                {
+                    if (handle.MethodTableInitialized)
+                    {
+                        ret.Add(handle);
+                        continue;
+                    }
+
+                    var obj = await proc.LoadObjectInstanceFieldsSpecificsAsync(handle.ObjectAddress).ConfigureAwait(false);
+
+                    var withMt = handle.SetMethodTable(obj.Value.MethodTable);
+                    ret.Add(withMt);
+                }
+
+                return ret.ToImmutable();
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ArrayPoolParameters))]
+        public async Task LoadHeapFragmentationAsync(ArrayPool<char> pool)
+        {
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+
+            await using (var analyze = await AnalyzerProcess.CreateAsync(pool, dump.DotNetDumpPath, dump.DumpFile))
+            {
+                // check against the manual way
+                long gen0, gen1, gen2, loh, poh;
+                gen0 = gen1 = gen2 = loh = poh = 0;
+
+                long freeGen0, freeGen1, freeGen2, freeLoh, freePoh;
+                freeGen0 = freeGen1 = freeGen2 = freeLoh = freePoh = 0;
+
+                var inFree = false;
+
+                await foreach (var line in analyze.SendCommand(Command.CreateCommand("gcheapstat")).ConfigureAwait(false))
+                {
+                    var str = line.ToString();
+                    line.Dispose();
+
+                    if (str.StartsWith("Free space:"))
+                    {
+                        inFree = true;
+                        continue;
+                    }
+
+                    var match = Regex.Match(str, @"^ (?<heapName> \S+) \s+ (?<gen0> \d+) \s+ (?<gen1> \d+) \s+ (?<gen2> \d+) \s+ (?<loh> \d+) \s+ (?<poh> \d+)? .* $", RegexOptions.IgnoreCase | RegexOptions.IgnorePatternWhitespace);
+
+                    if (!match.Success)
+                    {
+                        continue;
+                    }
+
+                    var heapName = match.Groups["heapName"].Value;
+                    var g0 = long.Parse(match.Groups["gen0"].Value);
+                    var g1 = long.Parse(match.Groups["gen1"].Value);
+                    var g2 = long.Parse(match.Groups["gen2"].Value);
+                    var l = long.Parse(match.Groups["loh"].Value);
+                    var p = match.Groups.ContainsKey("poh") && match.Groups["poh"].Success ? long.Parse(match.Groups["poh"].Value) : 0L;
+
+                    if (heapName == "Total")
+                    {
+                        continue;
+                    }
+
+                    if (inFree)
+                    {
+                        freeGen0 += g0;
+                        freeGen1 += g1;
+                        freeGen2 += g2;
+                        freeLoh += l;
+                        freePoh += p;
+                    }
+                    else
+                    {
+                        gen0 += g0;
+                        gen1 += g1;
+                        gen2 += g2;
+                        loh += l;
+                        poh += p;
+                    }
+                }
+
+                var rawFragmentation = new HeapFragmentation(freeGen0, gen0, freeGen1, gen1, freeGen2, gen2, freeLoh, loh, freePoh, poh);
+
+                var fragementation = await analyze.LoadHeapFragmentationAsync().ConfigureAwait(false);
+
+                Assert.Equal(rawFragmentation, fragementation);
+            }
+        }
+
         private static async ValueTask<ImmutableDictionary<TypeDetails, ImmutableHashSet<long>>> LoadTypeDetailsAsync(AnalyzerProcess analyze)
         {
             var ret = ImmutableDictionary.CreateBuilder<TypeDetails, ImmutableHashSet<long>>();
@@ -674,13 +1169,18 @@ namespace DumpDiag.Tests
             foreach (var mt in mts)
             {
                 var details = await analyze.ReadMethodTableTypeDetailsAsync(mt).ConfigureAwait(false);
-
-                if (!ret.TryGetValue(details, out var existing))
+                if (details == null)
                 {
-                    ret[details] = existing = ImmutableHashSet<long>.Empty;
+                    throw new Exception("Shouldn't be possible");
                 }
 
-                ret[details] = existing.Add(mt);
+
+                if (!ret.TryGetValue(details.Value, out var existing))
+                {
+                    ret[details.Value] = existing = ImmutableHashSet<long>.Empty;
+                }
+
+                ret[details.Value] = existing.Add(mt);
             }
 
             return ret.ToImmutable();
