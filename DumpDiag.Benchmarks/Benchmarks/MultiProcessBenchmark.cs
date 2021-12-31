@@ -17,7 +17,7 @@ namespace DumpDiag.Benchmarks.Benchmarks
         internal string DotNetDumpPath { get; set; }
         internal string DumpFile { get; set; }
 
-        internal DumpDiagnoser Diagnoser { get; set; }
+        internal DumpDiagnoser<DotNetDumpAnalyzerProcess> Diagnoser { get; set; }
 
         [GlobalSetup]
         public void Setup()
@@ -58,7 +58,7 @@ namespace DumpDiag.Benchmarks.Benchmarks
         [IterationSetup]
         public void StartDiagnoser()
         {
-            Diagnoser = DumpDiagnoser.CreateAsync(DotNetDumpPath, DumpFile, NumProcesses).AsTask().GetAwaiter().GetResult();
+            Diagnoser = DumpDiagnoser.CreateDotNetDumpAsync(DotNetDumpPath, DumpFile, NumProcesses).AsTask().GetAwaiter().GetResult();
         }
 
         [IterationCleanup]

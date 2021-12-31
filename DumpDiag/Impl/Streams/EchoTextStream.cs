@@ -44,7 +44,7 @@ namespace DumpDiag.Impl
 
         public override int Read(Span<byte> buffer)
         {
-            const int MAX_KEEP = 48 * 1024;
+            const int MAX_KEEP = 128 * 1024;
 
             var read = inner.Read(buffer);
             var toConvert = buffer[0..read];

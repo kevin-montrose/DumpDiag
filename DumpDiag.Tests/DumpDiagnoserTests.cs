@@ -1,9 +1,11 @@
 ﻿using DumpDiag.Impl;
 using DumpDiag.Tests.Helpers;
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
@@ -20,7 +22,7 @@ namespace DumpDiag.Tests
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
             ImmutableDictionary<string, ReferenceStats> res;
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 res = await diag.LoadStringCountsAsync().ConfigureAwait(false);
             }
@@ -34,7 +36,7 @@ namespace DumpDiag.Tests
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
             ImmutableDictionary<string, ReferenceStats> res;
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 res = await diag.LoadDelegateCountsAsync().ConfigureAwait(false);
             }
@@ -50,7 +52,7 @@ namespace DumpDiag.Tests
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
             ImmutableDictionary<string, ReferenceStats> res;
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 res = await diag.LoadCharacterArrayCountsAsync().ConfigureAwait(false);
             }
@@ -66,7 +68,7 @@ namespace DumpDiag.Tests
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
             ThreadAnalysis res;
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 res = await diag.LoadThreadDetailsAsync().ConfigureAwait(false);
             }
@@ -87,7 +89,7 @@ namespace DumpDiag.Tests
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
             ImmutableList<AsyncMachineBreakdown> res;
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 res = await diag.GetAsyncMachineBreakdownsAsync().ConfigureAwait(false);
             }
@@ -179,7 +181,7 @@ namespace DumpDiag.Tests
 
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 var stringType = diag.typeDetails.Keys.Single(t => t.TypeName == "System.String");
                 var objectType = diag.typeDetails.Keys.Single(t => t.TypeName == "System.Object");
@@ -267,7 +269,7 @@ namespace DumpDiag.Tests
 
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 var bigType = diag.typeDetails.Keys.Single(x => x.TypeName.Contains("_Big`26"));
                 var bArgs = (await diag.GetGenericTypeParametersAsync(new[] { bigType }).ConfigureAwait(false)).Single().Value;
@@ -321,7 +323,7 @@ namespace DumpDiag.Tests
         {
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
                 // only looking at the TOP level type if it has generic args
                 var targetTypes =
@@ -462,29 +464,101 @@ namespace DumpDiag.Tests
         {
             await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
 
-            await using var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, numProcs).ConfigureAwait(false);
+            await using var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, numProcs).ConfigureAwait(false);
             Assert.NotNull(diag);
         }
 
         [Fact]
         public async Task AnalyzeAsync()
         {
-            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync().ConfigureAwait(false);
 
-            string written;
-            await using (var diag = await DumpDiagnoser.CreateAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+            AnalyzeResult dotNetDumpRes;
             {
-                var res = await diag.AnalyzeAsync().ConfigureAwait(false);
-
-                using (var writer = new StringWriter())
+                string written;
+                await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
                 {
-                    await res.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+                    dotNetDumpRes = await diag.AnalyzeAsync().ConfigureAwait(false);
 
-                    written = writer.ToString();
+                    using (var writer = new StringWriter())
+                    {
+                        await dotNetDumpRes.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+
+                        written = writer.ToString();
+                    }
+                }
+
+                Assert.NotEmpty(written);
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                AnalyzeResult winDbgRes;
+                await using (var winDbg = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump).ConfigureAwait(false))
+                {
+                    string written;
+                    await using (var diag = await DumpDiagnoser.CreateRemoteWinDbgAsync(winDbg.DbgEngDllPath, IPAddress.Loopback.ToString(), winDbg.LocalPort, TimeSpan.FromSeconds(30)).ConfigureAwait(false))
+                    {
+                        winDbgRes = await diag.AnalyzeAsync().ConfigureAwait(false);
+
+                        using (var writer = new StringWriter())
+                        {
+                            await winDbgRes.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+
+                            written = writer.ToString();
+                        }
+                    }
+
+                    Assert.NotEmpty(written);
+                }
+
+                CheckEquals(dotNetDumpRes, winDbgRes);
+            }
+
+            // check the results are the same
+            static void CheckEquals(AnalyzeResult a, AnalyzeResult b)
+            {
+                CheckEqualsSequential(a.AsyncStateMachineBreakdown.OrderBy(static x => x.Type).AsEnumerable(), b.AsyncStateMachineBreakdown.OrderBy(static x => x.Type).AsEnumerable());
+
+                CheckEqualsSequential(a.AsyncStateMatchineStats.OrderBy(static x => (x.Key, x.Value)), b.AsyncStateMatchineStats.OrderBy(static x => (x.Key, x.Value)));
+
+                CheckEqualsSequential(a.CharacterArrayReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.CharacterArrayReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+                CheckEqualsSequential(a.DelegateReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.DelegateReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+                Assert.Equal(a.HeapFragmentation, b.HeapFragmentation);
+
+                Assert.Equal(a.PinAnalysis, b.PinAnalysis);
+
+                CheckEqualsSequential(a.StringReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.StringReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+                Assert.Equal(a.ThreadDetails, b.ThreadDetails);
+
+                CheckEqualsSequential(a.TypeReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.TypeReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+                // go item by item so we get better errors
+                static void CheckEqualsSequential<T>(IEnumerable<T> x, IEnumerable<T> y)
+                {
+                    var count = Math.Max(x.Count(), y.Count());
+
+                    using(var xE = x.GetEnumerator())
+                    using(var yE = y.GetEnumerator())
+                    {
+                        var xRes = xE.MoveNext();
+                        var yRes = yE.MoveNext();
+
+                        Assert.Equal(xRes, yRes);
+
+                        if (!xRes)
+                        {
+                            return;
+                        }
+
+                        Assert.Equal(xE.Current, yE.Current);
+                    }
                 }
             }
 
-            Assert.NotEmpty(written);
         }
     }
 }

@@ -1,6 +1,5 @@
 ﻿using BenchmarkDotNet.Running;
-using DumpDiag.Benchmarks.Benchmarks;
-using System;
+using System.Threading.Tasks;
 
 namespace DumpDiag.Benchmarks
 {
@@ -8,29 +7,6 @@ namespace DumpDiag.Benchmarks
     {
         static void Main(string[] args)
         {
-            //var x = new MultiProcessBenchmark();
-            //x.Setup();
-
-            //var incr = 0;
-
-            //while (true)
-            //{
-            //    for (var i = Environment.ProcessorCount; i >= 1; i--)
-            //    {
-            //        x.NumProcesses = i;
-
-            //        Console.WriteLine($"{incr:N0} ==> {x.NumProcesses}");
-
-            //        x.StartDiagnoser();
-            //        x.AnalyzeDump();
-            //        x.StopDiagnoser();
-
-            //        incr++;
-            //    }
-            //}
-
-            //x.Cleanup();
-
             BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
         }
     }

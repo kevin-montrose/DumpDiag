@@ -6,29 +6,31 @@ using System.Linq;
 using System;
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Runtime.Versioning;
 
 namespace DumpDiag.Impl
 {
-    internal sealed class DumpDiagnoser : IAsyncDisposable
+    internal enum ProgressKind : byte
     {
-        private enum ProgressKind : byte
-        {
-            StartingTasks,
-            LoadingHeap,
-            TypeDetails,
-            ThreadCount,
-            ThreadDetails,
-            CharacterArrays,
-            DeterminingDelegates,
-            DelegateDetails,
-            Strings,
-            AsyncDetails,
-            AnalyzingPins,
-            HeapAssignments
-        }
+        StartingTasks,
+        LoadingHeap,
+        TypeDetails,
+        ThreadCount,
+        ThreadDetails,
+        CharacterArrays,
+        DeterminingDelegates,
+        DelegateDetails,
+        Strings,
+        AsyncDetails,
+        AnalyzingPins,
+        HeapAssignments
+    }
 
+    internal sealed class DumpDiagnoser<TAnalyzer> : IAsyncDisposable
+        where TAnalyzer: class, IAnalyzer
+    {
         private readonly int numProcs;
-        private readonly LeaseTracker<AnalyzerProcess> procs;
+        private readonly LeaseTracker<TAnalyzer> procs;
         private readonly IProgress<DumpDiagnoserProgress>? progress;
         private readonly int[] progressMax;
         private readonly int[] progressCurrent;
@@ -50,10 +52,10 @@ namespace DumpDiag.Impl
         private ImmutableList<HeapDetails>? heapClassifications;
         private HeapFragmentation? heapFragmentation;
 
-        private DumpDiagnoser(int numProcs, IProgress<DumpDiagnoserProgress>? progress)
+        internal DumpDiagnoser(int numProcs, IProgress<DumpDiagnoserProgress>? progress)
         {
             this.numProcs = numProcs;
-            procs = new LeaseTracker<AnalyzerProcess>();
+            procs = new LeaseTracker<TAnalyzer>();
             this.progress = progress;
 
             progressMax = new int[Enum.GetValues(typeof(ProgressKind)).Length];
@@ -70,7 +72,7 @@ namespace DumpDiag.Impl
             }
         }
 
-        private void MadeProgress(ProgressKind kind, int by)
+        internal void MadeProgress(ProgressKind kind, int by)
         {
             Debug.Assert(progressMax[(int)kind] > 0);
             Debug.Assert(by > 0);
@@ -126,7 +128,7 @@ namespace DumpDiag.Impl
             }
         }
 
-        private void SplitHeapByProcs()
+        internal void SplitHeapByProcs()
         {
             Debug.Assert(liveHeapEntriesByProc == null);
             Debug.Assert(deadHeapEntriesByProc == null);
@@ -210,8 +212,8 @@ namespace DumpDiag.Impl
         }
 
         private static async ValueTask<ImmutableDictionary<string, ReferenceStats>> LoadStringCountsInnerAsync(
-            DumpDiagnoser self,
-            AnalyzerProcess proc,
+            DumpDiagnoser<TAnalyzer> self,
+            TAnalyzer proc,
             StringDetails stringDetails,
             IEnumerable<HeapEntry> liveHeap,
             IEnumerable<HeapEntry> deadHeap
@@ -235,8 +237,8 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var len = await proc.GetStringLengthAsync(stringDetails, entry).ConfigureAwait(false);
-                var str = await proc.ReadCharsAsync(entry.Address + stringDetails.FirstCharOffset, len).ConfigureAwait(false);
+                var len = await proc.LoadStringLengthAsync(stringDetails, entry).ConfigureAwait(false);
+                var str = await proc.LoadCharsAsync(entry.Address + stringDetails.FirstCharOffset, len).ConfigureAwait(false);
 
                 if (!builder.TryGetValue(str, out var curStats))
                 {
@@ -262,8 +264,8 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var len = await proc.GetStringLengthAsync(stringDetails, entry).ConfigureAwait(false);
-                var str = await proc.ReadCharsAsync(entry.Address + stringDetails.FirstCharOffset, len).ConfigureAwait(false);
+                var len = await proc.LoadStringLengthAsync(stringDetails, entry).ConfigureAwait(false);
+                var str = await proc.LoadCharsAsync(entry.Address + stringDetails.FirstCharOffset, len).ConfigureAwait(false);
 
                 if (!builder.TryGetValue(str, out var curStats))
                 {
@@ -389,8 +391,8 @@ namespace DumpDiag.Impl
         }
 
         private static async ValueTask<ImmutableHashSet<long>> DetermineActualDelegateTypesInnerAsync(
-            DumpDiagnoser self,
-            AnalyzerProcess proc,
+            DumpDiagnoser<TAnalyzer> self,
+            TAnalyzer proc,
             IEnumerable<(string TypeName, ImmutableHashSet<long> MethodTables)> candidateDelegateTypes
         )
         {
@@ -472,8 +474,8 @@ namespace DumpDiag.Impl
         }
 
         private static async ValueTask<ImmutableDictionary<string, ReferenceStats>> LoadDelegateCountsInnerAsync(
-            DumpDiagnoser self,
-            AnalyzerProcess proc,
+            DumpDiagnoser<TAnalyzer> self,
+            TAnalyzer proc,
             ImmutableHashSet<long> delegateMethodTables,
             IEnumerable<HeapEntry> liveHeap,
             IEnumerable<HeapEntry> deadHeap
@@ -497,7 +499,7 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var del = await proc.ReadDelegateDetailsAsync(entry).ConfigureAwait(false);
+                var del = await proc.LoadDelegateDetailsAsync(entry).ConfigureAwait(false);
 
                 foreach (var detail in del.MethodDetails)
                 {
@@ -527,7 +529,7 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var del = await proc.ReadDelegateDetailsAsync(entry).ConfigureAwait(false);
+                var del = await proc.LoadDelegateDetailsAsync(entry).ConfigureAwait(false);
 
                 foreach (var detail in del.MethodDetails)
                 {
@@ -585,8 +587,8 @@ namespace DumpDiag.Impl
         }
 
         private static async ValueTask<ImmutableDictionary<string, ReferenceStats>> LoadCharacterArrayCountsInnerAsync(
-            DumpDiagnoser self,
-            AnalyzerProcess proc,
+            DumpDiagnoser<TAnalyzer> self,
+            TAnalyzer proc,
             long charArrayTypeMethodTable,
             IEnumerable<HeapEntry> liveHeap,
             IEnumerable<HeapEntry> deadHeap
@@ -610,8 +612,8 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var details = await proc.ReadArrayDetailsAsync(entry).ConfigureAwait(false);
-                var str = details.FirstElementAddress == null ? "" : (await proc.ReadCharsAsync(details.FirstElementAddress.Value, details.Length).ConfigureAwait(false));
+                var details = await proc.LoadArrayDetailsAsync(entry).ConfigureAwait(false);
+                var str = details.FirstElementAddress == null ? "" : (await proc.LoadCharsAsync(details.FirstElementAddress.Value, details.Length).ConfigureAwait(false));
 
                 if (!builder.TryGetValue(str, out var curStats))
                 {
@@ -638,8 +640,8 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var details = await proc.ReadArrayDetailsAsync(entry).ConfigureAwait(false);
-                var str = details.FirstElementAddress == null ? "" : (await proc.ReadCharsAsync(details.FirstElementAddress.Value, details.Length).ConfigureAwait(false));
+                var details = await proc.LoadArrayDetailsAsync(entry).ConfigureAwait(false);
+                var str = details.FirstElementAddress == null ? "" : (await proc.LoadCharsAsync(details.FirstElementAddress.Value, details.Length).ConfigureAwait(false));
 
                 if (!builder.TryGetValue(str, out var curStats))
                 {
@@ -712,8 +714,8 @@ namespace DumpDiag.Impl
         }
 
         private static async ValueTask<ImmutableList<(int ThreadIndex, ImmutableList<AnalyzerStackFrame> StackTrace)>> LoadThreadDetailsInnerAsync(
-            DumpDiagnoser self,
-            AnalyzerProcess proc,
+            DumpDiagnoser<TAnalyzer> self,
+            TAnalyzer proc,
             IEnumerable<int> threadIndexes
         )
         {
@@ -723,7 +725,7 @@ namespace DumpDiag.Impl
             {
                 self.MadeProgress(ProgressKind.ThreadDetails, 1);
 
-                var stack = await proc.GetStackTraceForThreadAsync(threadIndex).ConfigureAwait(false);
+                var stack = await proc.LoadStackTraceForThreadAsync(threadIndex).ConfigureAwait(false);
 
                 if (stack.Count == 0)
                 {
@@ -790,7 +792,7 @@ namespace DumpDiag.Impl
             return uniques;
 
             static async ValueTask<ImmutableList<AsyncMachineBreakdown>> LoadAsyncMachineBreakdownAsync(
-                AnalyzerProcess proc,
+                TAnalyzer proc,
                 ImmutableDictionary<long, TypeDetails> typeDetails,
                 ImmutableList<(AsyncStateMachineDetails Details, ImmutableList<TypeDetails> GenericArguments)> forProc,
                 ConcurrentDictionary<long, TypeDetails> methodTableToTypeLookup
@@ -800,7 +802,7 @@ namespace DumpDiag.Impl
 
                 foreach (var sm in forProc)
                 {
-                    var builderType = await proc.ReadMethodTableTypeDetailsAsync(sm.Details.MethodTable).ConfigureAwait(false);
+                    var builderType = await proc.LoadMethodTableTypeDetailsAsync(sm.Details.MethodTable).ConfigureAwait(false);
                     var stateMachineClass = await proc.LoadEEClassAsync(sm.GenericArguments[1].MethodTable).ConfigureAwait(false);
 
                     var asyncBoxDetails = await proc.LoadEEClassDetailsAsync(stateMachineClass).ConfigureAwait(false);
@@ -820,7 +822,7 @@ namespace DumpDiag.Impl
             }
 
             static async ValueTask AddBreakdownAsync(
-                AnalyzerProcess proc,
+                TAnalyzer proc,
                 ImmutableList<AsyncMachineBreakdown>.Builder ret,
                 ConcurrentDictionary<long, TypeDetails> methodTableToTypeLookup,
                 TypeDetails type,
@@ -847,7 +849,7 @@ namespace DumpDiag.Impl
                     }
                     else if (!methodTableToTypeLookup.TryGetValue(fieldMt, out cached))
                     {
-                        var cachedNull = await proc.ReadMethodTableTypeDetailsAsync(fieldMt).ConfigureAwait(false);
+                        var cachedNull = await proc.LoadMethodTableTypeDetailsAsync(fieldMt).ConfigureAwait(false);
                         if (cachedNull == null)
                         {
                             throw new InvalidOperationException($"Couldn't load type details for {fieldMt:X2}");
@@ -896,7 +898,7 @@ namespace DumpDiag.Impl
 
         private static async ValueTask<ImmutableDictionary<TypeDetails, ImmutableList<TypeDetails>>> LoadGenericTypeParameters(
             ImmutableDictionary<long, TypeDetails> typeDetailsLookup,
-            AnalyzerProcess proc,
+            TAnalyzer proc,
             ImmutableList<TypeDetails> types)
         {
             // todo: this for sure does not work in 32-bit
@@ -930,24 +932,24 @@ namespace DumpDiag.Impl
 
                 // address where a pointer to the generic arg list is stored
                 var perInstInfoAddr = mt + ARG_LIST_ADDR_OFFSET;
-                var instInfoAddrs = await proc.ReadLongsAsync(perInstInfoAddr, 1).ConfigureAwait(false);
+                var instInfoAddrs = await proc.LoadLongsAsync(perInstInfoAddr, 1).ConfigureAwait(false);
 
                 // address where header starts
                 var instInfoAddr = instInfoAddrs[0];
                 var headerAddr = instInfoAddr - POINTER_SIZE;
 
-                var headers = await proc.ReadLongsAsync(headerAddr, 1).ConfigureAwait(false);
+                var headers = await proc.LoadLongsAsync(headerAddr, 1).ConfigureAwait(false);
                 var header = (ulong)(headers[0]) >> 32;
                 var numEntries = (int)(header & NUM_ENTRIES_MASK);
                 var numPairs = (int)(header & NUM_PAIRS_MASK) >> 16;
 
                 var lastEntryAddr = instInfoAddr + (numEntries - 1) * POINTER_SIZE;
-                var entries = await proc.ReadLongsAsync(lastEntryAddr, 1).ConfigureAwait(false);
+                var entries = await proc.LoadLongsAsync(lastEntryAddr, 1).ConfigureAwait(false);
                 var genArgListAddr = entries[0];
 
                 var argDetails = ImmutableList.CreateBuilder<TypeDetails>();
 
-                var genArgPtrs = await proc.ReadLongsAsync(genArgListAddr, numPairs).ConfigureAwait(false);
+                var genArgPtrs = await proc.LoadLongsAsync(genArgListAddr, numPairs).ConfigureAwait(false);
 
                 var genArgMtsBuilder = ImmutableArray.CreateBuilder<long>(numPairs);
 
@@ -963,7 +965,7 @@ namespace DumpDiag.Impl
 
                     var indirectToAddr = (ptr & ~0x7) + 8;
 
-                    var indirectMt = await proc.ReadLongsAsync(indirectToAddr, 1).ConfigureAwait(false);
+                    var indirectMt = await proc.LoadLongsAsync(indirectToAddr, 1).ConfigureAwait(false);
                     genArgMtsBuilder.Add(indirectMt[0]);
                 }
 
@@ -974,7 +976,7 @@ namespace DumpDiag.Impl
                     TypeDetails details;
                     if (!typeDetailsLookup.TryGetValue(argMt, out details))
                     {
-                        var detailsNull = await proc.ReadMethodTableTypeDetailsAsync(argMt).ConfigureAwait(false);
+                        var detailsNull = await proc.LoadMethodTableTypeDetailsAsync(argMt).ConfigureAwait(false);
                         if (detailsNull == null)
                         {
                             throw new InvalidOperationException($"Couldn't determine generic argument for {type}");
@@ -1048,8 +1050,8 @@ namespace DumpDiag.Impl
 
             var pins = pinsBuilder.ToImmutable();
 
-            var pinCountsBuilder = ImmutableDictionary.CreateBuilder<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>.Builder>();
-            var asyncPinCountsBuilder = ImmutableDictionary.CreateBuilder<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>.Builder>();
+            var pinCountsBuilder = ImmutableDictionary.CreateBuilder<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>.Builder>();
+            var asyncPinCountsBuilder = ImmutableDictionary.CreateBuilder<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>.Builder>();
 
             var pinsHandled = 0;
 
@@ -1063,7 +1065,7 @@ namespace DumpDiag.Impl
                     pinsHandled = 0;
                 }
 
-                ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>.Builder>.Builder toUsePinCounts;
+                ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>.Builder>.Builder toUsePinCounts;
 
                 if (pin.HandleType == HeapGCHandle.HandleTypes.AsyncPinned)
                 {
@@ -1081,19 +1083,19 @@ namespace DumpDiag.Impl
                 var he = new HeapEntry(pin.ObjectAddress, pin.MethodTable, pin.Size, true);
                 var classified = DetermineGeneration(heapClassifications, he);
 
-                var pinTypeName = methodTableToTypeDetails[pin.MethodTable].TypeName;
+                var pinType = methodTableToTypeDetails[pin.MethodTable];
 
                 if (!toUsePinCounts.TryGetValue(classified, out var byTypeName))
                 {
-                    toUsePinCounts[classified] = byTypeName = ImmutableDictionary.CreateBuilder<string, (int Count, long Size)>();
+                    toUsePinCounts[classified] = byTypeName = ImmutableDictionary.CreateBuilder<TypeDetails, (int Count, long Size)>();
                 }
 
-                if (!byTypeName.TryGetValue(pinTypeName, out var cur))
+                if (!byTypeName.TryGetValue(pinType, out var cur))
                 {
-                    byTypeName[pinTypeName] = cur = (0, 0);
+                    byTypeName[pinType] = cur = (0, 0);
                 }
 
-                byTypeName[pinTypeName] = (cur.Count + 1, cur.Size + pin.Size);
+                byTypeName[pinType] = (cur.Count + 1, cur.Size + pin.Size);
             }
 
             if (pinsHandled != 0)
@@ -1119,7 +1121,7 @@ namespace DumpDiag.Impl
                 throw new Exception($"Couldn't classify {he}, shouldn't be possible");
             }
 
-            static async ValueTask<ImmutableDictionary<long, long>> LoadMethodTableForHandlesAsync(AnalyzerProcess proc, ImmutableList<HeapGCHandle> handles)
+            static async ValueTask<ImmutableDictionary<long, long>> LoadMethodTableForHandlesAsync(TAnalyzer proc, ImmutableList<HeapGCHandle> handles)
             {
                 var ret = ImmutableDictionary.CreateBuilder<long, long>();
 
@@ -1329,32 +1331,19 @@ namespace DumpDiag.Impl
             return dels.SelectMany(x => x.MethodTables).ToImmutableHashSet();
         }
 
-        private async ValueTask StartProcessesAsync(string dotnetDump, string dumpPath)
+        internal async ValueTask StartAnalyzersAsync(Func<Task<TAnalyzer>> createDel)
         {
             SetProgressLimit(ProgressKind.StartingTasks, numProcs);
 
-            var procTasks = new Task<AnalyzerProcess>[numProcs];
+            var procTasks = new Task<TAnalyzer>[numProcs];
             for (var i = 0; i < procTasks.Length; i++)
             {
-                procTasks[i] = StartAnalyzerProcessAsync(this, dotnetDump, dumpPath);
+                procTasks[i] = createDel();
             }
 
             var ready = await Task.WhenAll(procTasks).ConfigureAwait(false);
 
             procs.SetTrackedValues(ready);
-
-            static async Task<AnalyzerProcess> StartAnalyzerProcessAsync(
-                DumpDiagnoser self,
-                string dotnetDump,
-                string dumpPath
-            )
-            {
-                var proc = await AnalyzerProcess.CreateAsync(ArrayPool<char>.Shared, dotnetDump, dumpPath).ConfigureAwait(false);
-
-                self.MadeProgress(ProgressKind.StartingTasks, 1);
-
-                return proc;
-            }
         }
 
         private ValueTask<int> LoadThreadCountAsync()
@@ -1411,7 +1400,7 @@ namespace DumpDiag.Impl
                                     soFar = 0;
                                 }
 
-                                var name = await proc.ReadMethodTableTypeDetailsAsync(mt).ConfigureAwait(false);
+                                var name = await proc.LoadMethodTableTypeDetailsAsync(mt).ConfigureAwait(false);
                                 if (name == null)
                                 {
                                     throw new InvalidOperationException($"Couldn't load type details for {mt:X2}");
@@ -1531,7 +1520,7 @@ namespace DumpDiag.Impl
             );
         }
 
-        private async ValueTask LoadNeededStateAsync()
+        internal async ValueTask LoadNeededStateAsync()
         {
             // load thread counts
             var threadCountTask = LoadThreadCountAsync();
@@ -1577,18 +1566,61 @@ namespace DumpDiag.Impl
             stringDetails = await stringDetailsTask.ConfigureAwait(false);
             (heapClassifications, heapFragmentation) = await loadHeapClassificationTask.ConfigureAwait(false);
         }
+    }
 
-        internal static async ValueTask<DumpDiagnoser> CreateAsync(string dotnetDump, string dumpPath, int processCount, IProgress<DumpDiagnoserProgress>? progress = null)
+    internal static class DumpDiagnoser
+    {
+        internal static async ValueTask<DumpDiagnoser<DotNetDumpAnalyzerProcess>> CreateDotNetDumpAsync(string dotnetDump, string dumpPath, int processCount, IProgress<DumpDiagnoserProgress>? progress = null)
         {
             Debug.Assert(processCount > 0);
 
-            var ret = new DumpDiagnoser(processCount, progress);
-            await ret.StartProcessesAsync(dotnetDump, dumpPath).ConfigureAwait(false);
+            var ret = new DumpDiagnoser<DotNetDumpAnalyzerProcess>(processCount, progress);
+            await ret.StartAnalyzersAsync(() => StartAnalyzerProcessAsync(ret, dotnetDump, dumpPath)).ConfigureAwait(false);
             await ret.LoadNeededStateAsync().ConfigureAwait(false);
 
             ret.SplitHeapByProcs();
 
             return ret;
+
+            static async Task<DotNetDumpAnalyzerProcess> StartAnalyzerProcessAsync(
+                DumpDiagnoser<DotNetDumpAnalyzerProcess> self,
+                string dotnetDump,
+                string dumpPath
+            )
+            {
+                var proc = await DotNetDumpAnalyzerProcess.CreateAsync(ArrayPool<char>.Shared, dotnetDump, dumpPath).ConfigureAwait(false);
+
+                self.MadeProgress(ProgressKind.StartingTasks, 1);
+
+                return proc;
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        internal static async ValueTask<DumpDiagnoser<RemoteWinDbg>> CreateRemoteWinDbgAsync(string dbgEngDllPath, string ip, ushort port, TimeSpan timeout, IProgress<DumpDiagnoserProgress>? progress = null)
+        {
+            var ret = new DumpDiagnoser<RemoteWinDbg>(1, progress);
+            await ret.StartAnalyzersAsync(() => StartRemoteWinDbgAsync(ret, dbgEngDllPath, ip, port, timeout)).ConfigureAwait(false);
+            await ret.LoadNeededStateAsync().ConfigureAwait(false);
+
+            ret.SplitHeapByProcs();
+
+            return ret;
+
+            static async Task<RemoteWinDbg> StartRemoteWinDbgAsync(
+                DumpDiagnoser<RemoteWinDbg> self,
+                string dbgEngDllPath, 
+                string ip, 
+                ushort port, 
+                TimeSpan timeout
+            )
+            {
+                var remote = await RemoteWinDbg.CreateAsync(ArrayPool<char>.Shared, dbgEngDllPath, ip, port, timeout).ConfigureAwait(false);
+
+                self.MadeProgress(ProgressKind.StartingTasks, 1);
+
+                return remote;
+            }
         }
     }
 }

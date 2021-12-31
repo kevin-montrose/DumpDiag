@@ -1,12 +1,18 @@
 ﻿using DumpDiag.Impl;
+using DumpDiag.CommandLine;
 using System;
-using System.Collections.Generic;
 using System.CommandLine;
 using System.CommandLine.Invocation;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
-using System.Linq;
-using System.Text;
+using System.Net;
+using System.Runtime.Versioning;
 using System.Threading.Tasks;
+
+using static DumpDiag.CommandLine.CommandLineArguments;
+using static DumpDiag.CommandLine.CommandLineVerbs;
+
+using Command = System.CommandLine.Command;
 
 namespace DumpDiag
 {
@@ -14,11 +20,27 @@ namespace DumpDiag
     {
         public static async Task Main(string[] args)
         {
+            var root = new RootCommand();
+
+            root.AddCommand(CreateDotNetDumpCommand());
+
+            if (OperatingSystem.IsWindows())
+            {
+                root.AddCommand(CreateRemoteWinDbgCommand());
+            }
+
+            await root.InvokeAsync(args);
+        }
+
+        private static Command CreateDotNetDumpCommand()
+        {
+            var command = new Command(DOTNET_DUMP);
+
             var dotnetDumpOption =
                 new Option<FileInfo?>(
-                    new[] { "-ddp", "--dotnet-dump-path" },
+                    new[] { DOTNET_DUMP_PATH_SHORT, DOTNET_DUMP_PATH_LONG },
                     getDefaultValue:
-                    () =>
+                    static () =>
                     {
                         if (DotNetToolFinder.TryFind("dotnet-dump", out var path, out _))
                         {
@@ -29,397 +51,315 @@ namespace DumpDiag
                     },
                     description: "Path to dotnet-dump executable, will be inferred if omitted"
                 );
+            command.AddOption(dotnetDumpOption);
+
             var dumpFileOption =
                 new Option<FileInfo?>(
-                    new[] { "-df", "--dump-file" },
+                    new[] { DUMP_FILE_PATH_SHORT, DUMP_FILE_PATH_LONG },
                     getDefaultValue: () => null,
                     description: "Existing full process dump to analyze"
                 );
+            command.AddOption(dumpFileOption);
+
             var dumpPidOption =
                 new Option<int?>(
-                    new[] { "-dpid", "--dump-process-id" },
+                    new[] { DUMP_PROCESS_ID_SHORT, DUMP_PROCESS_ID_LONG },
                     getDefaultValue: () => null,
                     description: "Id of .NET process to analyze"
                 );
+            command.AddOption(dumpPidOption);
+
             var degreeParallelism =
                 new Option<int>(
-                    new[] { "-dp", "--degree-parallelism" },
+                    new[] { DEGREE_PARALLELISM_SHORT, DEGREE_PARALLELISM_LONG },
                     getDefaultValue: static () => Math.Max(1, Environment.ProcessorCount - 1),
                     description: "How many processes to use to analyze the dump"
                 );
+            command.AddOption(degreeParallelism);
+
             var saveDumpOption =
                 new Option<FileInfo?>(
-                    new[] { "-sd", "--save-dump-file" },
+                    new[] { SAVE_DUMP_FILE_PATH_SHORT, SAVE_DUMP_FILE_PATH_LONG },
                     getDefaultValue: () => null,
-                    description: "Used in conjunction with --dump-process-id, saves a new full process dump to the given file"
+                    description: $"Used in conjunction with {DUMP_PROCESS_ID_LONG}, saves a new full process dump to the given file"
                 );
+            command.AddOption(saveDumpOption);
+
             var reportFileOption =
                 new Option<FileInfo?>(
-                    new[] { "-rf", "--report-file" },
+                    new[] { REPORT_FILE_PATH_SHORT, REPORT_FILE_PATH_LONG },
                     getDefaultValue: () => null,
                     description: "Instead of writing to standard out, saves diagnostic report to the given file"
                 );
+            command.AddOption(reportFileOption);
+
             var minCountOption =
                 new Option<int>(
-                    new[] { "-mc", "--min-count" },
+                    new[] { MIN_COUNT_SHORT, MIN_COUNT_LONG },
                     getDefaultValue: () => 1,
                     description: "Minimum count of strings, char[], type instances, etc. to include in analysis"
                 );
+            command.AddOption(minCountOption);
+
             var minAsyncSizeOption =
                 new Option<int>(
-                    new[] { "-mas", "--min-async-size" },
+                    new[] { MIN_ASYNC_SIZE_SHORT, MIN_ASYNC_SIZE_LONG },
                     getDefaultValue: () => 1,
                     description: "Minimum size (in bytes) of async state machines to include a field breakdown in analysis"
                 );
+            command.AddOption(minAsyncSizeOption);
+
             var overwriteOption =
                 new Option<bool>(
-                    new[] { "-o", "--overwrite" },
+                    new[] { OVERWRITE_SHORT, OVERWRITE_LONG },
                     getDefaultValue: static () => false,
-                    description: "Overwrite --report-file and --dump-file if they exist"
+                    description: $"Overwrite {REPORT_FILE_PATH_LONG} and {DUMP_FILE_PATH_LONG} if they exist"
                 );
+            command.AddOption(overwriteOption);
+
             var quietOption =
                 new Option<bool>(
-                    new[] { "-q", "--quiet" },
+                    new[] { QUIET_SHORT, QUIET_LONG },
                     getDefaultValue: static () => false,
                     description: "Suppress progress updates"
                 );
-            var commands = new RootCommand { dotnetDumpOption, dumpFileOption, dumpPidOption, degreeParallelism, saveDumpOption, minCountOption, minAsyncSizeOption, reportFileOption, overwriteOption, quietOption };
+            command.AddOption(quietOption);
 
-            commands.Handler = CommandHandler.Create<FileInfo?, FileInfo?, int?, int, FileInfo?, int, int, FileInfo?, bool, bool>(
-                async static (dotnetDumpPath, dumpFile, dumpProcessId, degreeParallelism, saveDumpFile, minCount, minAsyncSize, reportFile, overwrite, quiet) =>
+            command.Handler = CommandHandler.Create<FileInfo?, FileInfo?, int?, int, FileInfo?, int, int, FileInfo?, bool, bool>(
+                static async (dotnetDumpPath, dumpFile, dumpProcessId, degreeParallelism, saveDumpFile, minCount, minAsyncSize, reportFile, overwrite, quiet) =>
                 {
-                    if (dumpFile == null && dumpProcessId == null)
-                    {
-                        Console.Error.WriteLine("One of --dump-file or --dump-process-id must be provided");
-                        Environment.Exit(-2);
-                    }
+                    var target = CreateAndValidateDotNetDumpTarget(degreeParallelism, dotnetDumpPath, dumpFile, dumpProcessId, minCount, minAsyncSize, reportFile, saveDumpFile, overwrite, quiet);
+                    var (code, error) = await target.RunAsync().ConfigureAwait(false);
 
-                    if (dumpFile != null && dumpProcessId != null)
+                    if (code != ExitCodes.Success)
                     {
-                        Console.Error.WriteLine("Only one of --dump-file and --dump-process-id can be provided");
-                        Environment.Exit(-3);
+                        Console.Error.WriteLine(error);
+                        Exit(code);
                     }
-
-                    if (saveDumpFile != null && dumpProcessId == null)
-                    {
-                        Console.Error.WriteLine("--save-dump-file must be used with --dump-process-id");
-                        Environment.Exit(-4);
-                    }
-
-                    if (degreeParallelism <= 0)
-                    {
-                        Console.Error.WriteLine("--degree-parallelism must be >= 1");
-                        Environment.Exit(-5);
-                    }
-
-                    if (minCount < 1)
-                    {
-                        Console.Error.WriteLine("--min-count must be >= 1");
-                        Environment.Exit(-6);
-                    }
-
-                    if (minAsyncSize < 1)
-                    {
-                        Console.Error.WriteLine("--min-async-size must be >= 1");
-                        Environment.Exit(-7);
-                    }
-
-                    await RunAsync(
-                        dotnetDumpPath,
-                        dumpFile,
-                        dumpProcessId,
-                        degreeParallelism,
-                        saveDumpFile,
-                        minCount,
-                        minAsyncSize,
-                        reportFile,
-                        overwrite,
-                        quiet
-                    );
                 }
             );
 
-            await commands.InvokeAsync(args);
+            return command;
+
+            static DotNetDumpTarget CreateAndValidateDotNetDumpTarget(
+                int degreeParallelism,
+                FileInfo? dotNetDump,
+                FileInfo? dumpFile,
+                int? dumpProcessId,
+                int minCount,
+                int minAsyncSize,
+                FileInfo? reportFile,
+                FileInfo? saveDumpFile,
+                bool overwrite,
+                bool quiet
+            )
+            {
+                if (dumpFile != null && dumpProcessId != null)
+                {
+                    Console.Error.WriteLine($"Only one of {DUMP_FILE_PATH_LONG} and {DUMP_PROCESS_ID_LONG} can be provided");
+                    Exit(ExitCodes.BothDumpAndProcessSpecified);
+                }
+
+                if (saveDumpFile != null && dumpProcessId == null)
+                {
+                    Console.Error.WriteLine($"{SAVE_DUMP_FILE_PATH_LONG} must be used with {DUMP_PROCESS_ID_LONG}");
+                    Exit(ExitCodes.SaveDumpFileMustHaveDumpProcessId);
+                }
+
+                if (degreeParallelism < 1)
+                {
+                    Console.Error.WriteLine($"{DEGREE_PARALLELISM_LONG} must be >= 1");
+                    Exit(ExitCodes.DegreeParallelismTooLow);
+                }
+
+                CommonChecks(minAsyncSize, minCount);
+
+                return
+                    new DotNetDumpTarget(
+                        degreeParallelism,
+                        dotNetDump,
+                        dumpFile,
+                        dumpProcessId,
+                        minCount,
+                        minAsyncSize,
+                        overwrite,
+                        quiet,
+                        Console.Out,
+                        saveDumpFile,
+                        reportFile
+                    );
+            }
         }
 
-        private sealed class ProgressWrapper : IProgress<DumpDiagnoserProgress>
+        [SupportedOSPlatform("windows")]
+        private static Command CreateRemoteWinDbgCommand()
         {
-            private readonly Action<DumpDiagnoserProgress> del;
+            var command = new Command(WINDBG);
 
-            internal ProgressWrapper(Action<DumpDiagnoserProgress> del)
-            {
-                this.del = del;
-            }
+            var connectionStringOptions =
+                new Option<string?>(
+                    new[] { WINDBG_CONNECTION_STRING_LONG, WINDBG_CONNECTION_STRING_SHORT },
+                    description: "Connection details for remote WinDbg session, formatted like <ip>:port"
+                );
+            command.AddOption(connectionStringOptions);
 
-            public void Report(DumpDiagnoserProgress progress)
-            => del(progress);
-        }
+            var dbgEngDllOptions =
+                new Option<string?>(
+                    new [] {DBGENG_DLL_PATH_LONG, DBGENG_DLL_PATH_SHORT},
+                    getDefaultValue: 
+                        static () =>
+                        {
+                            if(DbgEngFinder.TryFindDefault(out var path))
+                            {
+                                return path;
+                            }
 
-        private static async ValueTask RunAsync(
-            FileInfo? dotnetDump,
-            FileInfo? dumpFile,
-            int? dumpPid,
-            int degreeParallelism,
-            FileInfo? saveDumpTo,
-            int minCount,
-            int minAsyncStateMachineSize,
-            FileInfo? saveReportTo,
-            bool overwrite,
-            bool quiet
-        )
-        {
-            // todo: async state machine size minimum
+                            return null;
+                        },
+                    description: "Path to dbgeng.dll matching remote WinDbg version, will be inferred if omitted"
+                );
+            command.AddOption(dbgEngDllOptions);
 
-            string? dotnetDumpPath;
-            if (dotnetDump == null)
-            {
-                if (!DotNetToolFinder.TryFind("dotnet-dump", out dotnetDumpPath, out var error))
+            var reportFileOption =
+                new Option<FileInfo?>(
+                    new[] { REPORT_FILE_PATH_SHORT, REPORT_FILE_PATH_LONG },
+                    getDefaultValue: () => null,
+                    description: "Instead of writing to standard out, saves diagnostic report to the given file"
+                );
+            command.AddOption(reportFileOption);
+
+            var minCountOption =
+                new Option<int>(
+                    new[] { MIN_COUNT_SHORT, MIN_COUNT_LONG },
+                    getDefaultValue: () => 1,
+                    description: "Minimum count of strings, char[], type instances, etc. to include in analysis"
+                );
+            command.AddOption(minCountOption);
+
+            var minAsyncSizeOption =
+                new Option<int>(
+                    new[] { MIN_ASYNC_SIZE_SHORT, MIN_ASYNC_SIZE_LONG },
+                    getDefaultValue: () => 1,
+                    description: "Minimum size (in bytes) of async state machines to include a field breakdown in analysis"
+                );
+            command.AddOption(minAsyncSizeOption);
+
+            var overwriteOption =
+                new Option<bool>(
+                    new[] { OVERWRITE_SHORT, OVERWRITE_LONG },
+                    getDefaultValue: static () => false,
+                    description: $"Overwrite {REPORT_FILE_PATH_LONG} if it exists"
+                );
+            command.AddOption(overwriteOption);
+
+            var quietOption =
+                new Option<bool>(
+                    new[] { QUIET_SHORT, QUIET_LONG },
+                    getDefaultValue: static () => false,
+                    description: "Suppress progress updates"
+                );
+            command.AddOption(quietOption);
+
+            command.Handler = CommandHandler.Create<string?, FileInfo?, FileInfo?, int, int, bool, bool>(
+                static async (connectionString, dbgEngPath, reportFile, minCount, minAsync, overwrite, quiet) =>
                 {
-                    Console.Error.WriteLine($"Could not find dotnet-dump: {error}");
-                    Environment.Exit(-8);
-                }
-            }
-            else
-            {
-                if (!dotnetDump.Exists)
-                {
-                    Console.Error.WriteLine($"dotnet-dump does not exist at: {dotnetDump.FullName}");
-                    Environment.Exit(-9);
-                }
+                    var target = CreateAndValidateRemoteWinDbg(connectionString, dbgEngPath, minAsync, minCount, reportFile, overwrite, quiet);
+                    var (code, error) = await target.RunAsync().ConfigureAwait(false);
 
-                dotnetDumpPath = dotnetDump.FullName;
-            }
-
-            string? saveReportToPath;
-            if (saveReportTo != null)
-            {
-                if (saveReportTo.Exists && !overwrite)
-                {
-                    Console.Error.WriteLine($"Report file already exists: {saveReportTo.FullName}");
-                    Environment.Exit(-10);
-                }
-
-                saveReportToPath = saveReportTo.FullName;
-
-                Report($"Writing report to: {saveReportToPath}", quiet);
-            }
-            else
-            {
-                saveReportToPath = null;
-
-                Report("Writing report to standard output", quiet);
-            }
-
-            Report($"dotnet-dump location: {dotnetDumpPath}", quiet);
-
-            bool deleteDumpFile;
-            string dumpFilePath;
-            if (dumpFile == null)
-            {
-                if (saveDumpTo != null)
-                {
-                    if (saveDumpTo.Exists && !overwrite)
+                    if (code != ExitCodes.Success)
                     {
-                        Console.Error.WriteLine($"Dump file already exists: {saveDumpTo}");
-                        Environment.Exit(-11);
+                        Console.Error.WriteLine(error);
+                        Exit(code);
                     }
-
-                    dumpFilePath = saveDumpTo.FullName;
-                    deleteDumpFile = false;
-
-
-                    var dumpDir = Path.GetDirectoryName(dumpFilePath);
-                    if (dumpDir == null)
-                    {
-                        Console.Error.WriteLine($"Could not get directory for: {dumpFilePath}");
-                        Environment.Exit(-12);
-                    }
-
-                    Directory.CreateDirectory(dumpDir);
                 }
-                else
-                {
-                    dumpFilePath = Path.GetTempFileName();
-                    File.Delete(dumpFilePath);
-                    deleteDumpFile = true;
-                }
+            );
 
-                if (dumpPid == null)
+            return command;
+
+            static RemoteWinDbgTarget CreateAndValidateRemoteWinDbg(
+                string? connectionString,
+                FileInfo? dbgEngPath,
+                int minAsyncSize,
+                int minCount,
+                FileInfo? reportFile,
+                bool overwrite,
+                bool quiet
+            )
+            {
+                if (!OperatingSystem.IsWindows())
                 {
                     throw new Exception("Shouldn't be possible");
                 }
 
-                Report($"Taking dump of process id: {dumpPid.Value}", quiet);
-                var (success, log) = await DumpProcess.TakeDumpAsync(dotnetDumpPath, dumpPid.Value, dumpFilePath);
-
-                if (!success)
+                if (dbgEngPath == null)
                 {
-                    Console.Error.WriteLine("Dump failed");
-                    Console.Error.WriteLine(log);
-                    Environment.Exit(-13);
-                }
-            }
-            else
-            {
-                if (!dumpFile.Exists)
-                {
-                    Console.Error.WriteLine($"Could not find dump file: {dumpFile.FullName}");
-                    Environment.Exit(-14);
+                    Console.Error.WriteLine($"{DBGENG_DLL_PATH_LONG} must be set");
+                    Exit(ExitCodes.DbgEngDllPathNotSet);
                 }
 
-                dumpFilePath = dumpFile.FullName;
-                deleteDumpFile = false;
-            }
+                IPAddress? hostIp = null;
+                ushort port = ushort.MaxValue;
 
-            Report($"Analyzing dump file: {dumpFilePath}", quiet);
-
-            try
-            {
-                var prog = new ProgressWrapper(prog => ReportProgress(prog, quiet));
-
-                await using var diag = await DumpDiagnoser.CreateAsync(dotnetDumpPath, dumpFilePath, degreeParallelism, prog);
-                var res = await diag.AnalyzeAsync();
-
-                Report("Analyzing complete", quiet);
-
-                if (saveReportToPath == null)
+                if (string.IsNullOrEmpty(connectionString))
                 {
-                    if (!quiet)
-                    {
-                        Console.Out.WriteLine();
-                        Console.Out.WriteLine("---");
-                        Console.Out.WriteLine();
-                    }
-
-                    using (var writer = new StringWriter())
-                    {
-                        await res.WriteToAsync(writer, minCount, minAsyncStateMachineSize);
-
-                        Console.Out.WriteLine(writer.ToString());
-                    }
+                    Console.Error.WriteLine($"{WINDBG_CONNECTION_STRING_LONG} must be set");
+                    Exit(ExitCodes.WindbgConnectionStringNotSet);
                 }
                 else
                 {
-                    Report($"Saving report to: {saveReportTo}", quiet);
-
-                    using (var fs = File.CreateText(saveReportToPath))
+                    var portStartIx = connectionString.IndexOf(':');
+                    if (portStartIx == -1)
                     {
-                        await res.WriteToAsync(fs, minCount, minAsyncStateMachineSize);
+                        Console.Error.WriteLine($"No port found in connection string: {connectionString}");
+                        Exit(ExitCodes.WindbgConnectionStringMissingPort);
+                    }
+
+                    var hostStr = connectionString[..portStartIx];
+                    var portStr = connectionString[(portStartIx + 1)..];
+
+                    if (!IPAddress.TryParse(hostStr, out hostIp))
+                    {
+                        Console.Error.WriteLine($"Could not parse ip: {hostStr}");
+                        Exit(ExitCodes.WindbgConnectionStringBadIP);
+                    }
+
+                    if (!ushort.TryParse(portStr, out port))
+                    {
+                        Console.Error.WriteLine($"Could not parse port: {portStr}");
+                        Exit(ExitCodes.WindbgConnectionStringBadPort);
                     }
                 }
+
+                if (hostIp == null)
+                {
+                    throw new Exception("Shouldn't be possible");
+                }
+
+                CommonChecks(minAsyncSize, minCount);
+
+                return new RemoteWinDbgTarget(dbgEngPath, hostIp.ToString(), minAsyncSize, minCount, overwrite, port, quiet, Console.Out, reportFile);
             }
-            finally
+        }
+
+        private static void CommonChecks(int minAsyncSize, int minCount)
+        {
+            if (minCount < 1)
             {
-                if (deleteDumpFile)
-                {
-                    Report($"Removing dump file", quiet);
-
-                    var attempt = 0;
-                    while (attempt < 3)
-                    {
-                        try
-                        {
-                            File.Delete(dumpFilePath);
-                            break;
-                        }
-                        catch { }
-
-                        await Task.Delay(100);
-                        attempt++;
-                    }
-                }
+                Console.Error.WriteLine($"{MIN_COUNT_LONG} must be >= 1");
+                Exit(ExitCodes.MinCountTooLow);
             }
 
-            static void Report(string message, bool quiet)
+            if (minAsyncSize < 1)
             {
-                if (quiet)
-                {
-                    return;
-                }
-
-                Console.Out.Write($"[{DateTime.UtcNow:u}]: ");
-                Console.Out.WriteLine(message);
+                Console.Error.WriteLine($"{MIN_ASYNC_SIZE_LONG} must be >= 1");
+                Exit(ExitCodes.MinAsyncSizeTooLow);
             }
+        }
 
-            static void ReportProgress(DumpDiagnoserProgress progress, bool quiet)
-            {
-                if (quiet)
-                {
-                    return;
-                }
-
-                var parts = new List<string>();
-
-                if (progress.PercentStartingTasks > 0 && progress.PercentStartingTasks < 100)
-                {
-                    parts.Add($"starting: {progress.PercentStartingTasks}%");
-                }
-
-                if (progress.PercentCharacterArrays > 0 && progress.PercentCharacterArrays < 100)
-                {
-                    parts.Add($"char[]s: {progress.PercentCharacterArrays}%");
-                }
-
-                if (progress.PercentDelegateDetails > 0 && progress.PercentDelegateDetails < 100)
-                {
-                    parts.Add($"delegates stats: {progress.PercentDelegateDetails}%");
-                }
-
-                if (progress.PercentDeterminingDelegates > 0 && progress.PercentDeterminingDelegates < 100)
-                {
-                    parts.Add($"finding delegates: {progress.PercentDeterminingDelegates}%");
-                }
-
-                if (progress.PercentLoadHeap > 0 && progress.PercentLoadHeap < 100)
-                {
-                    parts.Add($"scanning heap: {progress.PercentLoadHeap}%");
-                }
-
-                if (progress.PercentStrings > 0 && progress.PercentStrings < 100)
-                {
-                    parts.Add($"strings: {progress.PercentStrings}%");
-                }
-
-                if (progress.PercentThreadCount > 0 && progress.PercentThreadCount < 100)
-                {
-                    parts.Add($"thread count: {progress.PercentThreadCount}%");
-                }
-
-                if (progress.PercentThreadDetails > 0 && progress.PercentThreadDetails < 100)
-                {
-                    parts.Add($"thread details: {progress.PercentThreadDetails}%");
-                }
-
-                if (progress.PercentTypeDetails > 0 && progress.PercentTypeDetails < 100)
-                {
-                    parts.Add($"type details: {progress.PercentTypeDetails}%");
-                }
-
-                if (progress.PercentAsyncDetails > 0 && progress.PercentAsyncDetails < 100)
-                {
-                    parts.Add($"async details: {progress.PercentAsyncDetails}%");
-                }
-
-                if (progress.PercentHeapAssignments > 0 && progress.PercentHeapAssignments < 100)
-                {
-                    parts.Add($"heap assignments: {progress.PercentHeapAssignments}%");
-                }
-
-                if (progress.PercentAnalyzingPins > 0 && progress.PercentAnalyzingPins < 100)
-                {
-                    parts.Add($"pins: {progress.PercentAnalyzingPins}%");
-                }
-
-                if (parts.Count == 0)
-                {
-                    return;
-                }
-
-                var str = string.Join(", ", parts);
-
-                Console.Out.Write($"[{DateTime.UtcNow:u}]: ");
-                Console.Out.WriteLine(str);
-            }
+        [DoesNotReturn]
+        private static void Exit(ExitCodes code)
+        {
+            Environment.Exit((int)code);
         }
     }
 }

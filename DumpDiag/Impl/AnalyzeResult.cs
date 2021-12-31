@@ -190,7 +190,7 @@ namespace DumpDiag.Impl
                 static async ValueTask<bool> WriteSectionAsync(
                     TextWriter writer,
                     string sectionName,
-                    ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<string, (int Count, long Size)>> section,
+                    ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>> section,
                     bool needsSpacer
                 )
                 {
@@ -207,7 +207,7 @@ namespace DumpDiag.Impl
                     await writer.WriteLineAsync(sectionName).ConfigureAwait(false);
                     await writer.WriteLineAsync(new string('=', sectionName.Length)).ConfigureAwait(false);
 
-                    var maxTypeName = section.Max(kv => kv.Value.Max(x => x.Key.Length));
+                    var maxTypeName = section.Max(kv => kv.Value.Max(x => x.Key.TypeName.Length));
                     var maxClassification = section.Max(kv => kv.Key.ToString().Length);
                     var maxCountPlusBytes = section.Max(kv => kv.Value.Max(v => $"{v.Value.Count:N0}({v.Value.Size:N0})".Length));
 
@@ -244,7 +244,7 @@ namespace DumpDiag.Impl
 
                     foreach (var row in rows)
                     {
-                        await WritePartAsync(writer, row.Type, typeNameSize).ConfigureAwait(false);
+                        await WritePartAsync(writer, row.Type.TypeName, typeNameSize).ConfigureAwait(false);
                         await writer.WriteAsync("   ").ConfigureAwait(false);
 
                         await WritePartAsync(writer, row.Heap.ToString(), heapSize).ConfigureAwait(false);

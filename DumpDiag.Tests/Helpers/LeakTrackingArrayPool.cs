@@ -9,7 +9,7 @@ namespace DumpDiag.Tests.Helpers
     {
         private int Outstanding = 0;
 
-        private readonly ArrayPool<T> inner;
+        internal readonly ArrayPool<T> inner;
 
         private readonly Dictionary<T[], string> callerInfo;
 

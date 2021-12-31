@@ -263,12 +263,88 @@ namespace DumpDiag.Impl
             return true;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseWinDbgCharacters(
+            ReadOnlySequence<char> sequence,
+            int length,
+            Span<char> writeTo
+        )
+        {
+            // pattern is: ^ (?<addr> ([0-9a-f]+ `)? [0-9a-f]+ ) \s+ (?<repeatedChar> (?<char> [0-9a-f]+) \s* )+ $
+
+            var reader = new SequenceReader<char>(sequence);
+
+            // validate addr
+            if (reader.TryReadTo(out ReadOnlySequence<char> frontAddrStr, '`'))
+            {
+                // two part address
+                if (!frontAddrStr.TryParseHexLong(out _))
+                {
+                    return false;
+                }
+
+                if (!reader.TryReadTo(out ReadOnlySequence<char> backAddrStr, ' '))
+                {
+                    return false;
+                }
+
+                if (!backAddrStr.TryParseHexLong(out _))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ' '))
+                {
+                    return false;
+                }
+
+                if (!addrStr.TryParseHexLong(out _))
+                {
+                    return false;
+                }
+            }
+
+            reader.AdvancePast(' ');
+
+            // parse the chars (expect the last one)
+            for (var i = 0; i < length - 1; i++)
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> cStr, ' '))
+                {
+                    return false;
+                }
+
+                if (!cStr.TryParseHexShort(out var cShort))
+                {
+                    return false;
+                }
+
+                var c = (char)cShort;
+                writeTo[i] = c;
+
+                reader.AdvancePast(' ');
+            }
+
+            var lastCharStr = reader.UnreadSequence;
+            if (!lastCharStr.TryParseHexShort(out var lastCShort))
+            {
+                return false;
+            }
+
+            writeTo[length - 1] = (char)lastCShort;
+
+            return true;
+        }
+
         internal static bool TryParseCharacters(
             ReadOnlySequence<char> sequence,
             int length,
             ArrayPool<char> pool,
             [NotNullWhen(returnValue: true)]
-            out string? chars)
+            out string? chars
+        )
         {
             const int MAX_ON_CHARS_ON_STACK = 128;
 
@@ -986,6 +1062,74 @@ namespace DumpDiag.Impl
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseWinDbgLongs(ReadOnlySequence<char> seq, ImmutableArray<long>.Builder into)
+        {
+            // pattern is: ^ (?<addr> [0-9a-f]+ ` [0-9a-f]+) ( \s+  (?<value> [0-9a-f]+ ` [0-9a-f]+) )* $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // handle address
+            if (!reader.TryReadTo(out ReadOnlySequence<char> addrFront, '`'))
+            {
+                return false;
+            }
+
+            if (!addrFront.TryParseHexLong(out _))
+            {
+                return false;
+            }
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> addrBack, ' '))
+            {
+                return false;
+            }
+
+            if (!addrBack.TryParseHexLong(out _))
+            {
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // handle values
+            while(reader.Remaining > 0)
+            {
+                if(!reader.TryReadTo(out ReadOnlySequence<char> valueFront, '`'))
+                {
+                    return false;
+                }
+
+                if(!valueFront.TryParseHexLong(out var highBitsLong))
+                {
+                    return false;
+                }
+                var highBits = (uint)highBitsLong;
+
+                if(!reader.TryReadTo(out ReadOnlySequence<char> valueBack, ' '))
+                {
+                    valueBack = reader.UnreadSequence;
+                    reader.AdvanceToEnd();
+                }
+                else
+                {
+                    reader.AdvancePast(' ');
+                }
+
+                if(!valueBack.TryParseHexLong(out var lowBitsLong))
+                {
+                    return false;
+                }
+                var lowBits = (uint)lowBitsLong;
+
+                var value = ((ulong)highBits << 32) | lowBits;
+
+                into.Add((long)value);
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool TryParseLongs(ReadOnlySequence<char> seq, ImmutableArray<long>.Builder into)
         {
             // pattern is: ^ (?<addr> [0-9a-f]+): (?<value> [0-9a-f]+)+ $ 
@@ -1037,6 +1181,100 @@ namespace DumpDiag.Impl
             var reader = new SequenceReader<char>(seq);
 
             reader.AdvancePast('-');
+
+            return reader.UnreadSequence.IsEmpty;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseWinDbgHeapSegment(ReadOnlySequence<char> seq, out long startAddr, out long sizeBytes)
+        {
+            // pattern is: ^ (?<segment> [0-9a-f]+) \s+ (?<begin> [0-9a-f]+) \s+ (?<allocated> [0-9a-f]+) \s+ \( (?<allocatedSize> \d+) \) \s+ 0x([0-9a-f]+) $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // skip segment
+            if (!reader.TryReadTo(out ReadOnlySequence<char> segmentStr, ' '))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!segmentStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip begin
+            if (!reader.TryReadTo(out ReadOnlySequence<char> beginStr, ' '))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!beginStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read allocated
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocatedStr, ' '))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!allocatedStr.TryParseHexLong(out startAddr))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read allocated size
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocatedZeroStr, 'x'))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (allocatedZeroStr.Length != 1 || !allocatedZeroStr.StartsWith("0", StringComparison.Ordinal))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocSizeHexStr, '('))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!allocSizeHexStr.TryParseHexLong(out _))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!reader.TryReadTo(out ReadOnlySequence<char> allocatedSizeStr, ')'))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            if (!allocatedSizeStr.TryParseDecimalLong(out sizeBytes))
+            {
+                startAddr = sizeBytes = 0;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
 
             return reader.UnreadSequence.IsEmpty;
         }
@@ -1202,7 +1440,7 @@ namespace DumpDiag.Impl
             const string SIZED_REF = "SizedRef";
             const string DEPENDENT = "Dependent";
 
-            // pattern is: ^ (?<handle> [a-f0-9]+) \s+ (?<type> \S+) \s+ (?<obj> [a-f0-9]+) \s+ (?<size> \d+) \s+ ((?<refCount> \d+) \s+)? (?<name> .*) $
+            // pattern is: ^ (?<handle> [a-f0-9]+) \s+ (?<type> \S+) \s+ (?<obj> [a-f0-9]+) \s+ (?<size> \d+) \s+ ((?<refCount> [a-f0-9]+) \s+)? (?<name> .*) $
 
             var reader = new SequenceReader<char>(seq);
 
@@ -1323,7 +1561,7 @@ namespace DumpDiag.Impl
                     return false;
                 }
 
-                if (!refCountStr.TryParseDecimalInt(out _))
+                if (!refCountStr.TryParseHexLong(out _))
                 {
                     gcHandle = default;
                     return false;
@@ -1458,14 +1696,14 @@ namespace DumpDiag.Impl
 
             // skip heap name
 
-            if(!reader.TryReadTo(out ReadOnlySequence<char> heapName, ' '))
+            if (!reader.TryReadTo(out ReadOnlySequence<char> heapName, ' '))
             {
                 gen0 = gen1 = gen2 = loh = poh = 0;
                 return false;
             }
 
             // total isn't a valid heap
-            if(heapName.Equals(TOTAL, StringComparison.Ordinal))
+            if (heapName.Equals(TOTAL, StringComparison.Ordinal))
             {
                 gen0 = gen1 = gen2 = loh = poh = 0;
                 return false;
@@ -1475,13 +1713,13 @@ namespace DumpDiag.Impl
 
             // read gen0
 
-            if(!reader.TryReadTo(out ReadOnlySequence<char> gen0Str, ' '))
+            if (!reader.TryReadTo(out ReadOnlySequence<char> gen0Str, ' '))
             {
                 gen0 = gen1 = gen2 = loh = poh = 0;
                 return false;
             }
 
-            if(!gen0Str.TryParseDecimalLong(out gen0))
+            if (!gen0Str.TryParseDecimalLong(out gen0))
             {
                 gen0 = gen1 = gen2 = loh = poh = 0;
                 return false;
@@ -1491,13 +1729,13 @@ namespace DumpDiag.Impl
 
             // read gen1
 
-            if(!reader.TryReadTo(out ReadOnlySequence<char> gen1Str, ' '))
+            if (!reader.TryReadTo(out ReadOnlySequence<char> gen1Str, ' '))
             {
                 gen0 = gen1 = gen2 = loh = poh = 0;
                 return false;
             }
 
-            if(!gen1Str.TryParseDecimalLong(out gen1))
+            if (!gen1Str.TryParseDecimalLong(out gen1))
             {
                 gen0 = gen1 = gen2 = loh = poh = 0;
                 return false;
