@@ -125,7 +125,7 @@ namespace DumpDiag
                 );
             command.AddOption(quietOption);
 
-            command.Handler = CommandHandler.Create<FileInfo?, FileInfo?, int?, int, FileInfo?, int, int, FileInfo?, bool, bool>(
+            command.SetHandler<FileInfo?, FileInfo?, int?, int, FileInfo?, int, int, FileInfo?, bool, bool>(
                 static async (dotnetDumpPath, dumpFile, dumpProcessId, degreeParallelism, saveDumpFile, minCount, minAsyncSize, reportFile, overwrite, quiet) =>
                 {
                     var target = CreateAndValidateDotNetDumpTarget(degreeParallelism, dotnetDumpPath, dumpFile, dumpProcessId, minCount, minAsyncSize, reportFile, saveDumpFile, overwrite, quiet);
@@ -136,7 +136,17 @@ namespace DumpDiag
                         Console.Error.WriteLine(error);
                         Exit(code);
                     }
-                }
+                },
+                dotnetDumpOption,
+                dumpFileOption,
+                dumpPidOption,
+                degreeParallelism,
+                saveDumpOption,
+                minCountOption,
+                minAsyncSizeOption,
+                reportFileOption,
+                overwriteOption,
+                quietOption
             );
 
             return command;
@@ -203,22 +213,22 @@ namespace DumpDiag
                 );
             command.AddOption(connectionStringOptions);
 
-            var dbgEngDllOptions =
-                new Option<string?>(
-                    new [] {DBGENG_DLL_PATH_LONG, DBGENG_DLL_PATH_SHORT},
-                    getDefaultValue: 
+            var dbgEngDllOption =
+                new Option<FileInfo?>(
+                    new[] { DBGENG_DLL_PATH_LONG, DBGENG_DLL_PATH_SHORT },
+                    getDefaultValue:
                         static () =>
                         {
-                            if(DbgEngFinder.TryFindDefault(out var path))
+                            if (DbgEngFinder.TryFindDefault(out var path))
                             {
-                                return path;
+                                return new FileInfo(path);
                             }
 
                             return null;
                         },
                     description: "Path to dbgeng.dll matching remote WinDbg version, will be inferred if omitted"
                 );
-            command.AddOption(dbgEngDllOptions);
+            command.AddOption(dbgEngDllOption);
 
             var reportFileOption =
                 new Option<FileInfo?>(
@@ -260,7 +270,7 @@ namespace DumpDiag
                 );
             command.AddOption(quietOption);
 
-            command.Handler = CommandHandler.Create<string?, FileInfo?, FileInfo?, int, int, bool, bool>(
+           command.SetHandler<string?, FileInfo?, FileInfo?, int, int, bool, bool>(
                 static async (connectionString, dbgEngPath, reportFile, minCount, minAsync, overwrite, quiet) =>
                 {
                     var target = CreateAndValidateRemoteWinDbg(connectionString, dbgEngPath, minAsync, minCount, reportFile, overwrite, quiet);
@@ -271,7 +281,8 @@ namespace DumpDiag
                         Console.Error.WriteLine(error);
                         Exit(code);
                     }
-                }
+                },
+                connectionStringOptions, dbgEngDllOption, reportFileOption, minCountOption, minAsyncSizeOption, overwriteOption, quietOption
             );
 
             return command;

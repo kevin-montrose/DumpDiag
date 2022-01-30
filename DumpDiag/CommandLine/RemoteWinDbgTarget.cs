@@ -40,6 +40,8 @@ namespace DumpDiag.CommandLine
                 return (ExitCodes.DbgEngDllNotFound, $"Could not find {dbgEngDllPath.FullName}");
             }
 
+            Report(resultWriter, $"DbgEng.dll location: {dbgEngDllPath.FullName}", quiet);
+
             var prog = new ProgressWrapper(prog => ReportProgress(resultWriter, prog, quiet));
 
             await using var diag = await DumpDiagnoser.CreateRemoteWinDbgAsync(dbgEngDllPath.FullName, ip, port, TimeSpan.FromSeconds(30), prog);
