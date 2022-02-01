@@ -9,7 +9,7 @@ using ThreadState = System.Threading.ThreadState;
 
 namespace DumpDiag.Impl
 {
-    internal abstract class AnalyzerBase : IAsyncDisposable
+    internal abstract class AnalyzerBase : IAsyncDisposable, IHasCommandCount
     {
         private sealed class Message : IDisposable
         {
@@ -78,6 +78,9 @@ namespace DumpDiag.Impl
 
         protected ArrayPool<char> ArrayPool { get; }
 
+        private ulong totalExecutedCommands;
+        ulong IHasCommandCount.TotalExecutedCommands => totalExecutedCommands;
+
         protected AnalyzerBase(Stream inputStream, Encoding inputEncoding, Stream outputStream, Encoding outputEncoding, string newLine, ArrayPool<char> arrayPool)
         {
             this.newLine = newLine;
@@ -98,6 +101,8 @@ namespace DumpDiag.Impl
 #else
             underlyingOutput = outputStream;
 #endif
+
+            totalExecutedCommands = 0;
 
             disposed = false;
         }
@@ -155,11 +160,13 @@ namespace DumpDiag.Impl
 
                     message.FirstCommand.Write(underlyingInput, newLine, underlyingInputEncoding);
                     PushCommandResults(ref e, message.Response, endCommandSpan, promptStartSpan);
+                    totalExecutedCommands++;
 
                     if (message.SecondCommand != null)
                     {
                         message.SecondCommand.Value.Write(underlyingInput, newLine, underlyingInputEncoding);
                         PushCommandResults(ref e, message.Response, endCommandSpan, promptStartSpan);
+                        totalExecutedCommands++;
                     }
 
                     message.Response.Complete();

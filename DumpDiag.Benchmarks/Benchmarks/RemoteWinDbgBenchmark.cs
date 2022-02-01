@@ -8,6 +8,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Threading.Tasks;
 
@@ -44,7 +45,14 @@ namespace DumpDiag.Benchmarks.Benchmarks
 
             var dir = WinDbgHelper.WinDbgLocations.First();
             helper = WinDbgHelper.CreateWinDbgInstanceAsync(dir).GetAwaiter().GetResult();
-            remote = RemoteWinDbg.CreateAsync(ArrayPool<char>.Shared, helper.DbgEngDllPath, "127.0.0.1", helper.LocalPort, TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+
+            var libHandle = NativeLibrary.Load(helper.DbgEngDllPath);
+            if (!DebugConnectWideThunk.TryCreate(libHandle, out var thunk, out var error))
+            {
+                throw new Exception(error);
+            }
+
+            remote = RemoteWinDbg.CreateAsync(ArrayPool<char>.Shared, thunk, "127.0.0.1", helper.LocalPort, TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
 
             GC.KeepAlive(trashStrings);
             GC.KeepAlive(duped);

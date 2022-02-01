@@ -3,13 +3,11 @@ using DumpDiag.Impl;
 using DumpDiag.Tests.Helpers;
 using Microsoft.Diagnostics.Runtime.Interop;
 using System;
-using System.Buffers;
 using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -18,10 +16,18 @@ namespace DumpDiag.Tests
     public class RemoteWinDbgStreamTests : IAsyncLifetime
     {
         private WinDbgHelper helper;
+        private DebugConnectWideThunk thunk;
 
         public async Task InitializeAsync()
         {
             helper = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First()).ConfigureAwait(false);
+
+            var handle = NativeLibrary.Load(helper.DbgEngDllPath);
+
+            if (!Impl.DebugConnectWideThunk.TryCreate(handle, out thunk, out var error))
+            {
+                throw new Exception(error);
+            }
         }
 
         public Task DisposeAsync()
@@ -46,7 +52,9 @@ namespace DumpDiag.Tests
         [Fact]
         public void DebugConnectWideThunk()
         {
-            Assert.True(RemoteWinDbgStream.DebugConnectWideThunk.TryCreate(helper.DbgEngDllPath, out var thunk, out var error));
+            var handle = NativeLibrary.Load(helper.DbgEngDllPath);
+
+            Assert.True(Impl.DebugConnectWideThunk.TryCreate(handle, out var thunk, out var error));
             Assert.Null(error);
 
             using var client = thunk.CreateClient(IPAddress.Loopback.ToString(), helper.LocalPort);
@@ -127,7 +135,7 @@ namespace DumpDiag.Tests
             }
 
             Debug.WriteLine($"Step: {stepSizeBytes}");
-            await using var winDbg = await RemoteWinDbgStream.CreateAsync(helper.DbgEngDllPath, IPAddress.Loopback.ToString(), helper.LocalPort, TimeSpan.FromMinutes(30)).ConfigureAwait(false);
+            await using var winDbg = await RemoteWinDbgStream.CreateAsync(thunk, IPAddress.Loopback.ToString(), helper.LocalPort, TimeSpan.FromMinutes(30)).ConfigureAwait(false);
 
             winDbg.Write(Encoding.Unicode.GetBytes(Command));
 

@@ -13,6 +13,7 @@ using static DumpDiag.CommandLine.CommandLineArguments;
 using static DumpDiag.CommandLine.CommandLineVerbs;
 
 using Command = System.CommandLine.Command;
+using System.Collections.Immutable;
 
 namespace DumpDiag
 {
@@ -207,10 +208,13 @@ namespace DumpDiag
             var command = new Command(WINDBG);
 
             var connectionStringOptions =
-                new Option<string?>(
+                new Option<string[]?>(
                     new[] { WINDBG_CONNECTION_STRING_LONG, WINDBG_CONNECTION_STRING_SHORT },
                     description: "Connection details for remote WinDbg session, formatted like <ip>:port"
-                );
+                )
+                {
+                    Arity = ArgumentArity.OneOrMore
+                };
             command.AddOption(connectionStringOptions);
 
             var dbgEngDllOption =
@@ -270,10 +274,10 @@ namespace DumpDiag
                 );
             command.AddOption(quietOption);
 
-           command.SetHandler<string?, FileInfo?, FileInfo?, int, int, bool, bool>(
-                static async (connectionString, dbgEngPath, reportFile, minCount, minAsync, overwrite, quiet) =>
+           command.SetHandler<string[]?, FileInfo?, FileInfo?, int, int, bool, bool>(
+                static async (connectionStrings, dbgEngPath, reportFile, minCount, minAsync, overwrite, quiet) =>
                 {
-                    var target = CreateAndValidateRemoteWinDbg(connectionString, dbgEngPath, minAsync, minCount, reportFile, overwrite, quiet);
+                    var target = CreateAndValidateRemoteWinDbg(connectionStrings, dbgEngPath, minAsync, minCount, reportFile, overwrite, quiet);
                     var (code, error) = await target.RunAsync().ConfigureAwait(false);
 
                     if (code != ExitCodes.Success)
@@ -288,7 +292,7 @@ namespace DumpDiag
             return command;
 
             static RemoteWinDbgTarget CreateAndValidateRemoteWinDbg(
-                string? connectionString,
+                string[]? connectionStrings,
                 FileInfo? dbgEngPath,
                 int minAsyncSize,
                 int minCount,
@@ -308,47 +312,34 @@ namespace DumpDiag
                     Exit(ExitCodes.DbgEngDllPathNotSet);
                 }
 
-                IPAddress? hostIp = null;
-                ushort port = ushort.MaxValue;
-
-                if (string.IsNullOrEmpty(connectionString))
+                ImmutableList<RemoteWinDbgAddress> connectionStringsParsed;
+                if (connectionStrings == null || connectionStrings.Length == 0)
                 {
+                    connectionStringsParsed = ImmutableList<RemoteWinDbgAddress>.Empty;
+
                     Console.Error.WriteLine($"{WINDBG_CONNECTION_STRING_LONG} must be set");
                     Exit(ExitCodes.WindbgConnectionStringNotSet);
                 }
                 else
                 {
-                    var portStartIx = connectionString.IndexOf(':');
-                    if (portStartIx == -1)
+                    var connectionStringsBuilder = ImmutableList.CreateBuilder<RemoteWinDbgAddress>();
+                    foreach(var cs in connectionStrings)
                     {
-                        Console.Error.WriteLine($"No port found in connection string: {connectionString}");
-                        Exit(ExitCodes.WindbgConnectionStringMissingPort);
+                        if(!RemoteWinDbgAddress.TryParse(cs, out var addr, out var error))
+                        {
+                            Console.Error.WriteLine($"Bad connection string: {cs} (error was: {error})");
+                            Exit(ExitCodes.WindbgConnectionStringBad);
+                        }
+
+                        connectionStringsBuilder.Add(addr);
                     }
 
-                    var hostStr = connectionString[..portStartIx];
-                    var portStr = connectionString[(portStartIx + 1)..];
-
-                    if (!IPAddress.TryParse(hostStr, out hostIp))
-                    {
-                        Console.Error.WriteLine($"Could not parse ip: {hostStr}");
-                        Exit(ExitCodes.WindbgConnectionStringBadIP);
-                    }
-
-                    if (!ushort.TryParse(portStr, out port))
-                    {
-                        Console.Error.WriteLine($"Could not parse port: {portStr}");
-                        Exit(ExitCodes.WindbgConnectionStringBadPort);
-                    }
-                }
-
-                if (hostIp == null)
-                {
-                    throw new Exception("Shouldn't be possible");
+                    connectionStringsParsed = connectionStringsBuilder.ToImmutable();
                 }
 
                 CommonChecks(minAsyncSize, minCount);
 
-                return new RemoteWinDbgTarget(dbgEngPath, hostIp.ToString(), minAsyncSize, minCount, overwrite, port, quiet, Console.Out, reportFile);
+                return new RemoteWinDbgTarget(dbgEngPath, connectionStringsParsed, minAsyncSize, minCount, overwrite, quiet, Console.Out, reportFile);
             }
         }
 

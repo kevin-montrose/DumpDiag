@@ -37,12 +37,6 @@ namespace DumpDiag.Tests.Helpers
                 await WinDbg.WaitForExitAsync().ConfigureAwait(false);
             }
             catch { }
-
-            try
-            {
-                File.Delete(DumpFilePath);
-            }
-            catch { }
         }
 
         private static IEnumerable<string> EnumerateWinDbgDirectories()
@@ -85,7 +79,7 @@ namespace DumpDiag.Tests.Helpers
             }
         }
 
-        internal static async ValueTask<WinDbgHelper> CreateWinDbgInstanceAsync(string winDbgDirectory, SelfDumpHelper dump = null)
+        internal static async ValueTask<WinDbgHelper> CreateWinDbgInstanceAsync(string winDbgDirectory, SelfDumpHelper dump = null, ushort chosenPort = 10_000)
         {
             const string WINDBG_EXE = "windbg.exe";
 
@@ -93,9 +87,6 @@ namespace DumpDiag.Tests.Helpers
 
             var winDbgPath = Path.Combine(winDbgDirectory, WINDBG_EXE);
             var dbgEngPath = Path.Combine(winDbgDirectory, DBGENG_DLL);
-
-            // todo: dynamically assign this
-            ushort chosenPort = 10_000;
 
             var winDbgStart = new ProcessStartInfo();
             winDbgStart.FileName = winDbgPath;

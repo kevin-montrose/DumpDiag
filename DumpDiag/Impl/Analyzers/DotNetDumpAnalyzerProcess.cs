@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace DumpDiag.Impl
@@ -17,7 +18,7 @@ namespace DumpDiag.Impl
     {
         private readonly Process process;
 
-        private DotNetDumpAnalyzerProcess(Process proc, ArrayPool<char> arrayPool) 
+        private DotNetDumpAnalyzerProcess(Process proc, ArrayPool<char> arrayPool)
             : base(proc.StandardInput.BaseStream, proc.StandardInput.Encoding, proc.StandardOutput.BaseStream, proc.StandardOutput.CurrentEncoding, Environment.NewLine, arrayPool)
         {
             process = proc;
@@ -107,7 +108,7 @@ namespace DumpDiag.Impl
                 return new ValueTask<string>("");
             }
 
-            var command = SendCommand(Command.CreateCommandWithCountAndAdress("dw -w", length, "-c", addr));
+            var command = SendCommand(Command.CreateCommandWithCountAndAddress("dw -w", length, "-c", addr));
 
             return CompleteAsync(this, command, length);
 
@@ -173,7 +174,7 @@ namespace DumpDiag.Impl
 
         public ValueTask<ImmutableHashSet<long>> LoadUniqueMethodTablesAsync()
         {
-            var command = SendCommand(Command.CreateCommand("dumpheap"));
+            var command = SendCommand(Command.CreateCommand("dumpheap -stat"));
 
             return AnalyzerCommonCompletions.LoadUniqueMethodTables_CompleteAsync(command);
         }
@@ -187,7 +188,7 @@ namespace DumpDiag.Impl
 
         public ValueTask<ImmutableArray<long>> LoadLongsAsync(long addr, int count)
         {
-            var command = SendCommand(Command.CreateCommandWithCountAndAdress("dq -c", count, " -w ", addr));
+            var command = SendCommand(Command.CreateCommandWithCountAndAddress("dq -c", count, " -w ", addr));
 
             return CompleteAsync(command, count);
 
@@ -341,6 +342,72 @@ namespace DumpDiag.Impl
             var command = SendCommand(Command.CreateCommand("gcheapstat"));
 
             return AnalyzerCommonCompletions.LoadHeapFragmentation_CompleteAsync(command);
+        }
+
+        public ValueTask<StringPeak> PeakStringAsync(StringDetails details, HeapEntry entry)
+        {
+            var startAt = entry.Address + details.LengthOffset;
+
+            var command = SendCommand(Command.CreateCommandWithCountAndAddress("dw -w", StringPeak.PeakLength, "-c", startAt));
+
+            return CompleteAsync(this, command);
+
+            static async ValueTask<StringPeak> CompleteAsync(
+                DotNetDumpAnalyzerProcess self,
+                BoundedSharedChannel<OwnedSequence<char>>.AsyncEnumerable command
+            )
+            {
+                var length = 0;
+                var isFirstLine = true;
+                string? peakedString = null;
+                StringBuilder? builder = null;
+
+                var remainingLength = 0;
+
+                await foreach (var line in command.ConfigureAwait(false))
+                {
+                    using var lineRef = line;
+                    var seq = lineRef.GetSequence();
+
+                    if (isFirstLine)
+                    {
+                        if (!SequenceReaderHelper.TryParsePeakStringFirstLine(self.ArrayPool, seq, out length, out peakedString))
+                        {
+                            throw new Exception($"Could not peak string, shouldn't be possible");
+                        }
+
+                        isFirstLine = false;
+
+                        if (peakedString.Length != length)
+                        {
+                            // todo: don't love this
+                            builder = new StringBuilder(length);
+                            builder.Append(peakedString);
+
+                            remainingLength = length - peakedString.Length;
+                        }
+                    }
+                    else if (builder != null)
+                    {
+                        if (!SequenceReaderHelper.TryParsePeakStringLaterLines(self.ArrayPool, seq, remainingLength, out var nextString))
+                        {
+                            throw new Exception($"Could not peak string, shouldn't be possible");
+                        }
+
+                        builder.Append(nextString);
+                        remainingLength -= nextString.Length;
+                    }
+                }
+
+                var toRetString = builder?.ToString() ?? peakedString;
+
+                if (toRetString == null)
+                {
+                    throw new Exception("Shouldn't be possible");
+                }
+
+                return new StringPeak(length, toRetString);
+            }
         }
 
         /// <summary>

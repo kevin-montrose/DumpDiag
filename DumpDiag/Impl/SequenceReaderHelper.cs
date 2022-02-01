@@ -8,6 +8,8 @@ namespace DumpDiag.Impl
 {
     internal static class SequenceReaderHelper
     {
+        const int MAX_ON_CHARS_ON_STACK = 128;
+
         private const string FREE_STRING = "Free";
         private const string INSTANCE_ATTR_STRING = "instance";
 
@@ -308,7 +310,7 @@ namespace DumpDiag.Impl
 
             reader.AdvancePast(' ');
 
-            // parse the chars (expect the last one)
+            // parse the chars (except the last one)
             for (var i = 0; i < length - 1; i++)
             {
                 if (!reader.TryReadTo(out ReadOnlySequence<char> cStr, ' '))
@@ -346,8 +348,6 @@ namespace DumpDiag.Impl
             out string? chars
         )
         {
-            const int MAX_ON_CHARS_ON_STACK = 128;
-
             // pattern is: ^ (?<addr> [0-9a-f]+): \s+ (?<repeatedChar> (?<char> [0-9a-f]+) \s* )+ $
 
             var reader = new SequenceReader<char>(sequence);
@@ -1092,20 +1092,20 @@ namespace DumpDiag.Impl
             reader.AdvancePast(' ');
 
             // handle values
-            while(reader.Remaining > 0)
+            while (reader.Remaining > 0)
             {
-                if(!reader.TryReadTo(out ReadOnlySequence<char> valueFront, '`'))
+                if (!reader.TryReadTo(out ReadOnlySequence<char> valueFront, '`'))
                 {
                     return false;
                 }
 
-                if(!valueFront.TryParseHexLong(out var highBitsLong))
+                if (!valueFront.TryParseHexLong(out var highBitsLong))
                 {
                     return false;
                 }
                 var highBits = (uint)highBitsLong;
 
-                if(!reader.TryReadTo(out ReadOnlySequence<char> valueBack, ' '))
+                if (!reader.TryReadTo(out ReadOnlySequence<char> valueBack, ' '))
                 {
                     valueBack = reader.UnreadSequence;
                     reader.AdvanceToEnd();
@@ -1115,7 +1115,7 @@ namespace DumpDiag.Impl
                     reader.AdvancePast(' ');
                 }
 
-                if(!valueBack.TryParseHexLong(out var lowBitsLong))
+                if (!valueBack.TryParseHexLong(out var lowBitsLong))
                 {
                     return false;
                 }
@@ -1789,6 +1789,492 @@ namespace DumpDiag.Impl
             }
 
             // we're good, there can be trailing junk
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParsePeakStringFirstLine(ArrayPool<char> pool, ReadOnlySequence<char> seq, out int length, [NotNullWhen(returnValue: true)] out string? peaked)
+        {
+            // pattern is: ^ (?<addr> [0-9a-f]+): \s+ (?<repeatedChar> (?<char> [0-9a-f\?]+) \s* )+ $
+            // note the first two chars are a LENGTH, not character data
+
+            var reader = new SequenceReader<char>(seq);
+
+            // skip addr
+            if (!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ':'))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            if (!addrStr.TryParseHexLong(out _))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // first char (which is part of length)
+            if (!reader.TryReadTo(out ReadOnlySequence<char> length1Str, ' '))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            if (!length1Str.TryParseHexShort(out var length1))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // first second (which is part of length)
+            if (!reader.TryReadTo(out ReadOnlySequence<char> length2Str, ' '))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            if (!length2Str.TryParseHexShort(out var length2))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // set length
+            length = ((ushort)length2 << (sizeof(ushort) * 8)) | (ushort)length1;
+
+            var remainingLength = length;
+
+            var arr = length <= MAX_ON_CHARS_ON_STACK ? null : pool.Rent(length);
+            Span<char> writeTo = arr == null ? stackalloc char[length] : arr.AsSpan().Slice(0, length);
+            var writeToIndex = 0;
+
+            while (writeToIndex < length && !reader.End)
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> charStr, ' '))
+                {
+                    charStr = reader.UnreadSequence;
+                    reader.AdvanceToEnd();
+                }
+                else
+                {
+                    reader.AdvancePast(' ');
+                }
+
+                if (!charStr.TryParseHexShort(out var c))
+                {
+                    // we expect this to be something we can't read, so all ?s
+                    // if not... somthing has gone wrong
+                    if (!charStr.IsAll('?'))
+                    {
+                        throw new Exception("Shouldn't be possible");
+                    }
+
+                    break;
+                }
+
+                writeTo[writeToIndex] = (char)c;
+                writeToIndex++;
+            }
+
+            peaked = new string(writeTo[0..writeToIndex]);
+
+            if (arr != null)
+            {
+                pool.Return(arr);
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParsePeakStringFirstLineWinDbg(ArrayPool<char> pool, ReadOnlySequence<char> seq, out int length, [NotNullWhen(returnValue: true)] out string? peaked)
+        {
+            // pattern is: ^ (?<addr> ([0-9a-f]+ `)? [0-9a-f]+ ) \s+ (?<repeatedChar> (?<char> [0-9a-f\?]+) \s* )+ $
+            // note the first two chars are a LENGTH, not character data
+
+            var reader = new SequenceReader<char>(seq);
+
+            // skip addr
+            if (reader.TryReadTo(out ReadOnlySequence<char> frontAddrStr, '`'))
+            {
+                // two part address
+                if (!frontAddrStr.TryParseHexLong(out _))
+                {
+                    length = 0;
+                    peaked = null;
+                    return false;
+                }
+
+                if (!reader.TryReadTo(out ReadOnlySequence<char> backAddrStr, ' '))
+                {
+                    length = 0;
+                    peaked = null;
+                    return false;
+                }
+
+                if (!backAddrStr.TryParseHexLong(out _))
+                {
+                    length = 0;
+                    peaked = null;
+                    return false;
+                }
+            }
+            else
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ' '))
+                {
+                    length = 0;
+                    peaked = null;
+                    return false;
+                }
+
+                if (!addrStr.TryParseHexLong(out _))
+                {
+                    length = 0;
+                    peaked = null;
+                    return false;
+                }
+            }
+
+            reader.AdvancePast(' ');
+
+            // first char (which is part of length)
+            if (!reader.TryReadTo(out ReadOnlySequence<char> length1Str, ' '))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            if (!length1Str.TryParseHexShort(out var length1))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // first second (which is part of length)
+            if (!reader.TryReadTo(out ReadOnlySequence<char> length2Str, ' '))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            if (!length2Str.TryParseHexShort(out var length2))
+            {
+                length = 0;
+                peaked = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // set length
+            length = ((ushort)length2 << (sizeof(ushort) * 8)) | (ushort)length1;
+
+            var remainingLength = length;
+
+            var arr = length <= MAX_ON_CHARS_ON_STACK ? null : pool.Rent(length);
+            Span<char> writeTo = arr == null ? stackalloc char[length] : arr.AsSpan().Slice(0, length);
+            var writeToIndex = 0;
+
+            while (writeToIndex < length && !reader.End)
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> charStr, ' '))
+                {
+                    charStr = reader.UnreadSequence;
+                    reader.AdvanceToEnd();
+                }
+                else
+                {
+                    reader.AdvancePast(' ');
+                }
+
+                if (!charStr.TryParseHexShort(out var c))
+                {
+                    // we expect this to be something we can't read, so all ?s
+                    // if not... somthing has gone wrong
+                    if (!charStr.IsAll('?'))
+                    {
+                        throw new Exception("Shouldn't be possible");
+                    }
+
+                    break;
+                }
+
+                writeTo[writeToIndex] = (char)c;
+                writeToIndex++;
+            }
+
+            peaked = new string(writeTo[0..writeToIndex]);
+
+            if (arr != null)
+            {
+                pool.Return(arr);
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParsePeakStringLaterLines(ArrayPool<char> pool, ReadOnlySequence<char> seq, int maxLength, [NotNullWhen(returnValue: true)] out string? peaked)
+        {
+            // pattern is: ^ (?<addr> [0-9a-f]+): \s+ (?<repeatedChar> (?<char> [0-9a-f\?]+) \s* )+ $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // skip addr
+            if (!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ':'))
+            {
+                peaked = null;
+                return false;
+            }
+
+            if (!addrStr.TryParseHexLong(out _))
+            {
+                peaked = null;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // read characters
+            var arr = maxLength >= MAX_ON_CHARS_ON_STACK ? pool.Rent(maxLength) : null;
+            var writeTo = arr == null ? stackalloc char[maxLength] : arr.AsSpan()[0..maxLength];
+            var writeToIndex = 0;
+
+            while (writeToIndex < maxLength && !reader.End)
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> charStr, ' '))
+                {
+                    charStr = reader.UnreadSequence;
+                    reader.AdvanceToEnd();
+                }
+                else
+                {
+                    reader.AdvancePast(' ');
+                }
+
+                if (!charStr.TryParseHexShort(out var c))
+                {
+                    // we expect this to be something we can't read, so all ?s
+                    // if not... somthing has gone wrong
+                    if (!charStr.IsAll('?'))
+                    {
+                        throw new Exception("Shouldn't be possible");
+                    }
+
+                    break;
+                }
+
+                writeTo[writeToIndex] = (char)c;
+                writeToIndex++;
+            }
+
+            peaked = new string(writeTo);
+
+            if (arr != null)
+            {
+                pool.Return(arr);
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParsePeakStringLaterLinesWinDbg(ArrayPool<char> pool, ReadOnlySequence<char> seq, int maxLength, [NotNullWhen(returnValue: true)] out string? peaked)
+        {
+            // pattern is: ^ (?<addr> ([0-9a-f]+ `)? [0-9a-f]+ ) \s+ (?<repeatedChar> (?<char> [0-9a-f\?]+) \s* )+ $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // skip addr
+            if (reader.TryReadTo(out ReadOnlySequence<char> frontAddrStr, '`'))
+            {
+                // two part address
+                if (!frontAddrStr.TryParseHexLong(out _))
+                {
+                    peaked = null;
+                    return false;
+                }
+
+                if (!reader.TryReadTo(out ReadOnlySequence<char> backAddrStr, ' '))
+                {
+                    peaked = null;
+                    return false;
+                }
+
+                if (!backAddrStr.TryParseHexLong(out _))
+                {
+                    peaked = null;
+                    return false;
+                }
+            }
+            else
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> addrStr, ' '))
+                {
+                    peaked = null;
+                    return false;
+                }
+
+                if (!addrStr.TryParseHexLong(out _))
+                {
+                    peaked = null;
+                    return false;
+                }
+            }
+
+            reader.AdvancePast(' ');
+
+            // read characters
+            var arr = maxLength >= MAX_ON_CHARS_ON_STACK ? pool.Rent(maxLength) : null;
+            var writeTo = arr == null ? stackalloc char[maxLength] : arr.AsSpan()[0..maxLength];
+            var writeToIndex = 0;
+
+            while (writeToIndex < maxLength && !reader.End)
+            {
+                if (!reader.TryReadTo(out ReadOnlySequence<char> charStr, ' '))
+                {
+                    charStr = reader.UnreadSequence;
+                    reader.AdvanceToEnd();
+                }
+                else
+                {
+                    reader.AdvancePast(' ');
+                }
+
+                if (!charStr.TryParseHexShort(out var c))
+                {
+                    // we expect this to be something we can't read, so all ?s
+                    // if not... somthing has gone wrong
+                    if (!charStr.IsAll('?'))
+                    {
+                        throw new Exception("Shouldn't be possible");
+                    }
+
+                    break;
+                }
+
+                writeTo[writeToIndex] = (char)c;
+                writeToIndex++;
+            }
+
+            peaked = new string(writeTo);
+
+            if (arr != null)
+            {
+                pool.Return(arr);
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool IsHeapStatTableHeader(ReadOnlySequence<char> seq)
+        {
+            // pattern is:  ^ \s+ MT \s+ Count \s+ TotalSize \s+ Class Name \s+ $
+
+            var reader = new SequenceReader<char>(seq);
+
+            reader.AdvancePast(' ');
+
+            if(!reader.TryReadTo(out ReadOnlySequence<char> mt, ' '))
+            {
+                return false;
+            }
+
+            if (!mt.Equals("MT", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            // that's all we're going to check, it's fine
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool TryParseHeapStatLine(ReadOnlySequence<char> seq, out long mt, out bool free)
+        {
+            // pattern is:  ^ (?<mt>[0-9a-f]+) \s+ (?<count>\d+) \s+ (?<size>\d+) \s+ (?<name>.*?) \s+ $
+
+            var reader = new SequenceReader<char>(seq);
+
+            // parse method table
+            if (!reader.TryReadTo(out ReadOnlySequence<char> mtStr, ' '))
+            {
+                mt = 0;
+                free = false;
+                return false;
+            }
+
+            if(!mtStr.TryParseHexLong(out mt))
+            {
+                mt = 0;
+                free = false;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip count
+            if(!reader.TryReadTo(out ReadOnlySequence<char> countStr, ' '))
+            {
+                mt = 0;
+                free = false;
+                return false;
+            }
+
+            if(!countStr.TryParseDecimalLong(out _))
+            {
+                mt = 0;
+                free = false;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // skip size
+            if (!reader.TryReadTo(out ReadOnlySequence<char> sizeStr, ' '))
+            {
+                mt = 0;
+                free = false;
+                return false;
+            }
+
+            if (!sizeStr.TryParseDecimalLong(out _))
+            {
+                mt = 0;
+                free = false;
+                return false;
+            }
+
+            reader.AdvancePast(' ');
+
+            // check for free
+            if(!reader.TryReadTo(out ReadOnlySequence<char> nameStr, ' '))
+            {
+                nameStr = reader.UnreadSequence;
+            }
+
+            free = nameStr.Equals(FREE_STRING, StringComparison.Ordinal);
+
             return true;
         }
     }

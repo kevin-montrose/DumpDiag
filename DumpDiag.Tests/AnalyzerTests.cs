@@ -124,7 +124,13 @@ namespace DumpDiag.Tests
                             throw new InvalidOperation("Test only valid on Windows");
                         }
                         var helper = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump).ConfigureAwait(false);
-                        return (await RemoteWinDbg.CreateAsync(pool, helper.DbgEngDllPath, IPAddress.Loopback.ToString(), helper.LocalPort, TimeSpan.FromSeconds(30)), helper);
+
+                        Assert.True(NativeLibrary.TryLoad(helper.DbgEngDllPath, out var libHandle));
+
+                        var loaded = DebugConnectWideThunk.TryCreate(libHandle, out var thunk, out var error);
+                        Assert.True(loaded, error);
+
+                        return (await RemoteWinDbg.CreateAsync(pool, thunk, IPAddress.Loopback.ToString(), helper.LocalPort, TimeSpan.FromSeconds(30)), helper);
                     default:
                         throw new Exception($"Unexpected {analyzerName}");
 
@@ -462,11 +468,23 @@ namespace DumpDiag.Tests
                 var stringsBuilder = ImmutableList.CreateBuilder<string>();
                 foreach (var stringEntry in stringRefs)
                 {
-                    var stringLen = await analyzer.LoadStringLengthAsync(stringDetails, stringEntry).ConfigureAwait(false);
+                    var peaked = await analyzer.PeakStringAsync(stringDetails, stringEntry).ConfigureAwait(false);
 
-                    string val = await analyzer.LoadCharsAsync(stringEntry.Address + stringDetails.FirstCharOffset, stringLen).ConfigureAwait(false);
+                    string fromPeaking;
+                    if (peaked.ReadFullString)
+                    {
+                        fromPeaking = peaked.PeakedString;
+                    }
+                    else
+                    {
+                        var startAddr = stringEntry.Address + stringDetails.FirstCharOffset + peaked.PeakedString.Length * sizeof(char);
+                        var remainingLen = peaked.ActualLength - peaked.PeakedString.Length;
+                        var rest = await analyzer.LoadCharsAsync(startAddr, remainingLen).ConfigureAwait(false);
 
-                    stringsBuilder.Add(val);
+                        fromPeaking = peaked.PeakedString + rest;
+                    }
+
+                    stringsBuilder.Add(fromPeaking);
                 }
 
                 var strings = stringsBuilder.ToImmutable();
@@ -500,9 +518,26 @@ namespace DumpDiag.Tests
                     var stringsBuilder = ImmutableList.CreateBuilder<string>();
                     foreach (var stringEntry in stringRefs)
                     {
-                        var stringLen = await analyze.LoadStringLengthAsync(stringDetails, stringEntry).ConfigureAwait(false);
+                        var peaked = await analyze.PeakStringAsync(stringDetails, stringEntry).ConfigureAwait(false);
 
+                        string fromPeaking;
+                        if (peaked.ReadFullString)
+                        {
+                            fromPeaking = peaked.PeakedString;
+                        }
+                        else
+                        {
+                            var startAddr = stringEntry.Address + stringDetails.FirstCharOffset + peaked.PeakedString.Length * sizeof(char);
+                            var remainingLen = peaked.ActualLength - peaked.PeakedString.Length;
+                            var rest = await analyze.LoadCharsAsync(startAddr, remainingLen).ConfigureAwait(false);
+
+                            fromPeaking = peaked.PeakedString + rest;
+                        }
+
+                        var stringLen = await analyze.LoadStringLengthAsync(stringDetails, stringEntry).ConfigureAwait(false);
                         string val = await analyze.LoadCharsAsync(stringEntry.Address + stringDetails.FirstCharOffset, stringLen).ConfigureAwait(false);
+
+                        Assert.Equal(val, fromPeaking);
 
                         stringsBuilder.Add(val);
                     }
@@ -1741,7 +1776,7 @@ namespace DumpDiag.Tests
 
                         (long TargetAddress, long[] ExpectedValue)? ret = null;
 
-                        await foreach (var line in analyze.SendCommand(Command.CreateCommandWithCountAndAdress("dq -c", expected.Length, " -w ", arrayDetails.FirstElementAddress.Value)).ConfigureAwait(false))
+                        await foreach (var line in analyze.SendCommand(Command.CreateCommandWithCountAndAddress("dq -c", expected.Length, " -w ", arrayDetails.FirstElementAddress.Value)).ConfigureAwait(false))
                         {
                             var str = line.ToString();
                             line.Dispose();
@@ -1799,7 +1834,7 @@ namespace DumpDiag.Tests
             {
                 var actualBuilder = ImmutableList.CreateBuilder<TypeDetails>();
 
-                foreach(var mt in shouldMatch.MethodTables)
+                foreach (var mt in shouldMatch.MethodTables)
                 {
                     var details = await analyzer.LoadMethodTableTypeDetailsAsync(mt).ConfigureAwait(false);
                     if (details == null)
@@ -1812,7 +1847,7 @@ namespace DumpDiag.Tests
 
                 var actual = actualBuilder.ToImmutable();
 
-                for(var i = 0; i < Math.Max(shouldMatch.Details.Count, actual.Count); i++)
+                for (var i = 0; i < Math.Max(shouldMatch.Details.Count, actual.Count); i++)
                 {
                     var a = shouldMatch.Details[i];
                     var b = actual[i];
@@ -1844,6 +1879,91 @@ namespace DumpDiag.Tests
                     }
 
                     return (mtsInOrder.ToImmutable(), ret.ToImmutable());
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ArrayPoolParameters))]
+        public async Task PeakStringAsync(ArrayPool<char> pool)
+        {
+            var veryLongString = new string(Enumerable.Range(0, StringPeak.PeakLength * 5).Select(x => (char)('I' + x)).ToArray());
+
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync();
+
+            var shouldMatch = await GetShouldMatchAsync(dump).ConfigureAwait(false);
+
+            Assert.Contains(shouldMatch.Strings, x => x.ActualLength > StringPeak.PeakLength && !x.ReadFullString && veryLongString.StartsWith(x.PeakedString));
+
+            await RunForAllAnalyzersAsync(
+                pool,
+                dump,
+                shouldMatch,
+                static (analyzer, shouldMatch) => PeakStringCommonAsync(analyzer, shouldMatch)
+            )
+            .ConfigureAwait(false);
+
+            GC.KeepAlive(veryLongString);
+
+            // per-analyzer work that should produce consistent results
+            static async ValueTask PeakStringCommonAsync(IAnalyzer analyze, (StringDetails Details, ImmutableList<HeapEntry> HeapEntries, ImmutableList<StringPeak> Strings) context)
+            {
+                var peaksBuilder = ImmutableList.CreateBuilder<StringPeak>();
+
+                foreach (var stringRef in context.HeapEntries)
+                {
+                    var peaked = await analyze.PeakStringAsync(context.Details, stringRef).ConfigureAwait(false);
+
+                    peaksBuilder.Add(peaked);
+                }
+
+                var peaks = peaksBuilder.ToImmutable();
+
+                Assert.Equal(context.Strings.AsEnumerable(), peaks.AsEnumerable());
+            }
+
+            // load expected results
+            static async ValueTask<(StringDetails Details, ImmutableList<HeapEntry> HeapEntries, ImmutableList<StringPeak> Strings)> GetShouldMatchAsync(SelfDumpHelper dump)
+            {
+                await using (var analyze = await DotNetDumpAnalyzerProcess.CreateAsync(ArrayPool<char>.Shared, dump.DotNetDumpPath, dump.DumpFile).ConfigureAwait(false))
+                {
+                    var typeDetails = await LoadTypeDetailsAsync(analyze).ConfigureAwait(false);
+                    var stringType = typeDetails.Single(x => x.Key.TypeName == "System.String").Value.Single();
+
+                    var stringRefsBuilder = ImmutableList.CreateBuilder<HeapEntry>();
+
+                    await foreach (var entry in analyze.LoadHeapAsync(LoadHeapMode.Live).ConfigureAwait(false))
+                    {
+                        if (stringType == entry.MethodTable)
+                        {
+                            stringRefsBuilder.Add(entry);
+                        }
+                    }
+
+                    var stringRefs = stringRefsBuilder.ToImmutable();
+
+                    var stringDetails = await analyze.LoadStringDetailsAsync(stringRefs.First()).ConfigureAwait(false);
+
+                    var peaksBuilder = ImmutableList.CreateBuilder<StringPeak>();
+
+                    foreach (var stringRef in stringRefs)
+                    {
+                        var peaked = await analyze.PeakStringAsync(stringDetails, stringRef).ConfigureAwait(false);
+
+                        var knownLength = await analyze.LoadStringLengthAsync(stringDetails, stringRef).ConfigureAwait(false);
+                        Assert.Equal(knownLength, peaked.ActualLength);
+
+                        var knownValue = await analyze.LoadCharsAsync(stringRef.Address + stringDetails.FirstCharOffset, knownLength).ConfigureAwait(false);
+                        Assert.StartsWith(peaked.PeakedString, knownValue, StringComparison.Ordinal);
+
+                        Assert.Equal(peaked.PeakedString.Equals(knownValue), peaked.ReadFullString);
+
+                        peaksBuilder.Add(peaked);
+                    }
+
+                    var peaks = peaksBuilder.ToImmutable();
+
+                    return (stringDetails, stringRefs, peaks);
                 }
             }
         }

@@ -87,7 +87,7 @@ namespace DumpDiag.Impl
 
             // note that windbg has a maximum column count, so we might have to process multiple lines
             var command = SendCommand(Command.CreateCommandWithAddressAndHexCountSuffix(COMMAND_PREFIX, addr, length));
-            
+
             return CompleteAsync(ArrayPool, command, length);
 
             static async ValueTask<string> CompleteAsync(
@@ -255,6 +255,11 @@ namespace DumpDiag.Impl
                             cur.AddSegment(beginAddr, allocatedSize);
                             continue;
                         }
+                        else if(SequenceReaderHelper.TryParseHeapSegment(seq, out beginAddr, out allocatedSize))
+                        {
+                            cur.AddSegment(beginAddr, allocatedSize);
+                            continue;
+                        }
                     }
 
                     if (cur.IsStarted && SequenceReaderHelper.IsSectionBreak(seq))
@@ -290,7 +295,7 @@ namespace DumpDiag.Impl
 
         public ValueTask<ImmutableHashSet<long>> LoadUniqueMethodTablesAsync()
         {
-            var command = SendCommand(Command.CreateCommand("!dumpheap"));
+            var command = SendCommand(Command.CreateCommand("!dumpheap -stat"));
 
             return AnalyzerCommonCompletions.LoadUniqueMethodTables_CompleteAsync(command);
         }
@@ -341,6 +346,79 @@ namespace DumpDiag.Impl
             return AnalyzerCommonCompletions.LoadMethodTableTypeDetails_CompleteAsync(ArrayPool, command, methodTable);
         }
 
+        public ValueTask<StringPeak> PeakStringAsync(StringDetails stringDetails, HeapEntry entry)
+        {
+            const string COMMAND = "dw /c 80";  // 80 == hex of StringPeak.PeakLength
+
+            var startAt = entry.Address + stringDetails.LengthOffset;
+
+            var command = SendCommand(Command.CreateCommandWithAddressAndHexCountSuffix(COMMAND, startAt, StringPeak.PeakLength));
+
+            return CompleteAsync(this, command);
+
+            static async ValueTask<StringPeak> CompleteAsync(
+                RemoteWinDbg self,
+                BoundedSharedChannel<OwnedSequence<char>>.AsyncEnumerable command
+            )
+            {
+                var length = 0;
+                var isFirstLine = true;
+                string? peakedString = null;
+                StringBuilder? builder = null;
+
+                var remainingLength = 0;
+
+                await foreach (var line in command.ConfigureAwait(false))
+                {
+                    using var lineRef = line;
+                    var seq = lineRef.GetSequence();
+
+                    if (seq.IsEmpty)
+                    {
+                        continue;
+                    }
+
+                    if (isFirstLine)
+                    {
+                        if (!SequenceReaderHelper.TryParsePeakStringFirstLineWinDbg(self.ArrayPool, seq, out length, out peakedString))
+                        {
+                            throw new Exception($"Could not peak string, shouldn't be possible");
+                        }
+
+                        isFirstLine = false;
+
+                        if (peakedString.Length != length)
+                        {
+                            // todo: don't love this
+                            builder = new StringBuilder(length);
+                            builder.Append(peakedString);
+
+                            remainingLength = length - peakedString.Length;
+                        }
+                    }
+                    else if (builder != null)
+                    {
+                        if (!SequenceReaderHelper.TryParsePeakStringLaterLinesWinDbg(self.ArrayPool, seq, remainingLength, out var nextString))
+                        {
+                            throw new Exception($"Could not peak string, shouldn't be possible");
+                        }
+
+                        builder.Append(nextString);
+                        remainingLength -= nextString.Length;
+                    }
+                }
+
+                var toRetString = builder?.ToString() ?? peakedString;
+
+                if (toRetString == null)
+                {
+                    throw new Exception("Shouldn't be possible");
+                }
+
+                return new StringPeak(length, toRetString);
+            }
+        }
+
         public override async ValueTask DisposeAsync()
         {
             await DisposeInnerAsync().ConfigureAwait(false);
@@ -349,9 +427,9 @@ namespace DumpDiag.Impl
         }
 
         [SupportedOSPlatform("windows")]
-        internal static async ValueTask<RemoteWinDbg> CreateAsync(ArrayPool<char> arrayPool, string localDbgEngDllPath, string ip, ushort port, TimeSpan timeout)
+        internal static async ValueTask<RemoteWinDbg> CreateAsync(ArrayPool<char> arrayPool, DebugConnectWideThunk connectWideThunk, string ip, ushort port, TimeSpan timeout)
         {
-            var innerStream = await RemoteWinDbgStream.CreateAsync(localDbgEngDllPath, ip, port, timeout).ConfigureAwait(false);
+            var innerStream = await RemoteWinDbgStream.CreateAsync(connectWideThunk, ip, port, timeout).ConfigureAwait(false);
 
             var ret = new RemoteWinDbg(arrayPool, innerStream);
             await ret.StartAsync().ConfigureAwait(false);

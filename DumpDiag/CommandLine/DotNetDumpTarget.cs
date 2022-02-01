@@ -145,7 +145,7 @@ namespace DumpDiag.CommandLine
 
             try
             {
-                var prog = new ProgressWrapper(prog => ReportProgress(resultWriter, prog, quiet));
+                var prog = new ProgressWrapper(quiet, resultWriter);
 
                 await using var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dotnetDumpPath, dumpFilePath, degreeParallelism, prog).ConfigureAwait(false);
                 var res = await diag.AnalyzeAsync().ConfigureAwait(false);
@@ -207,87 +207,6 @@ namespace DumpDiag.CommandLine
 
                 writeTo.Write($"[{DateTime.UtcNow:u}]: ");
                 writeTo.WriteLine(message);
-            }
-
-            // report analysis progress
-            static void ReportProgress(TextWriter writer, DumpDiagnoserProgress progress, bool quiet)
-            {
-                if (quiet)
-                {
-                    return;
-                }
-
-                var parts = new List<string>();
-
-                if (progress.PercentStartingTasks > 0 && progress.PercentStartingTasks < 100)
-                {
-                    parts.Add($"starting: {progress.PercentStartingTasks}%");
-                }
-
-                if (progress.PercentCharacterArrays > 0 && progress.PercentCharacterArrays < 100)
-                {
-                    parts.Add($"char[]s: {progress.PercentCharacterArrays}%");
-                }
-
-                if (progress.PercentDelegateDetails > 0 && progress.PercentDelegateDetails < 100)
-                {
-                    parts.Add($"delegates stats: {progress.PercentDelegateDetails}%");
-                }
-
-                if (progress.PercentDeterminingDelegates > 0 && progress.PercentDeterminingDelegates < 100)
-                {
-                    parts.Add($"finding delegates: {progress.PercentDeterminingDelegates}%");
-                }
-
-                if (progress.PercentLoadHeap > 0 && progress.PercentLoadHeap < 100)
-                {
-                    parts.Add($"scanning heap: {progress.PercentLoadHeap}%");
-                }
-
-                if (progress.PercentStrings > 0 && progress.PercentStrings < 100)
-                {
-                    parts.Add($"strings: {progress.PercentStrings}%");
-                }
-
-                if (progress.PercentThreadCount > 0 && progress.PercentThreadCount < 100)
-                {
-                    parts.Add($"thread count: {progress.PercentThreadCount}%");
-                }
-
-                if (progress.PercentThreadDetails > 0 && progress.PercentThreadDetails < 100)
-                {
-                    parts.Add($"thread details: {progress.PercentThreadDetails}%");
-                }
-
-                if (progress.PercentTypeDetails > 0 && progress.PercentTypeDetails < 100)
-                {
-                    parts.Add($"type details: {progress.PercentTypeDetails}%");
-                }
-
-                if (progress.PercentAsyncDetails > 0 && progress.PercentAsyncDetails < 100)
-                {
-                    parts.Add($"async details: {progress.PercentAsyncDetails}%");
-                }
-
-                if (progress.PercentHeapAssignments > 0 && progress.PercentHeapAssignments < 100)
-                {
-                    parts.Add($"heap assignments: {progress.PercentHeapAssignments}%");
-                }
-
-                if (progress.PercentAnalyzingPins > 0 && progress.PercentAnalyzingPins < 100)
-                {
-                    parts.Add($"pins: {progress.PercentAnalyzingPins}%");
-                }
-
-                if (parts.Count == 0)
-                {
-                    return;
-                }
-
-                var str = string.Join(", ", parts);
-
-                writer.Write($"[{DateTime.UtcNow:u}]: ");
-                writer.WriteLine(str);
             }
         }
     }

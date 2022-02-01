@@ -251,5 +251,22 @@ namespace DumpDiag.Impl
                 return cur.LastIndexOf(c);
             }
         }
+
+        internal static bool IsAll(this ReadOnlySequence<char> sequence, char c)
+        {
+            foreach(var mem in sequence)
+            {
+                var span = mem.Span;
+                for(var i = 0; i < span.Length; i++)
+                {
+                    if(span[i] != c)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
     }
 }

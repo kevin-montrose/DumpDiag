@@ -7,15 +7,35 @@ using System.Threading.Tasks;
 
 namespace DumpDiag.Impl
 {
-    internal sealed class LeaseTracker<T> : IAsyncDisposable
-        where T : class, IAsyncDisposable
+    internal sealed class LeaseTracker<T> : IAsyncDisposable, IHasCommandCount
+        where T : class, IAsyncDisposable, IHasCommandCount
     {
+        public ulong TotalExecutedCommands
+        {
+            get
+            {
+                var ret = 0UL;
+
+                if (allValues != null)
+                {
+                    foreach (var val in allValues)
+                    {
+                        ret += val.TotalExecutedCommands;
+                    }
+                }
+
+                return ret;
+            }
+        }
+
         private readonly SemaphoreSlim signal;
 
         private ConcurrentQueue<T> claimed;
 
         private int maxLeases;
         private bool disposed;
+
+        private T[]? allValues;
 
         internal LeaseTracker()
         {
@@ -29,7 +49,9 @@ namespace DumpDiag.Impl
         {
             Debug.Assert(claimed.IsEmpty);
 
-            for (var i = 0; i < values.Length; i++)
+            allValues = values;
+
+            for (var i = 0; i < allValues.Length; i++)
             {
                 claimed.Enqueue(values[i]);
             }
@@ -38,7 +60,7 @@ namespace DumpDiag.Impl
             signal.Release(maxLeases);
         }
 
-        internal async ValueTask<V> RunWithLeasedAsync<V>(Func<T, ValueTask<V>> del, [CallerMemberName]string? caller = null)
+        internal async ValueTask<V> RunWithLeasedAsync<V>(Func<T, ValueTask<V>> del)
         {
             var leased = await LeaseAsync().ConfigureAwait(false);
 

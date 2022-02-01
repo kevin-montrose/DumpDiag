@@ -6,6 +6,7 @@ using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
@@ -475,44 +476,121 @@ namespace DumpDiag.Tests
 
             AnalyzeResult dotNetDumpRes;
             {
-                string written;
-                await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
+                using (var progressWriter = new StringWriter())
                 {
-                    dotNetDumpRes = await diag.AnalyzeAsync().ConfigureAwait(false);
+                    var progress = new CommandLine.ProgressWrapper(false, progressWriter);
 
-                    using (var writer = new StringWriter())
-                    {
-                        await dotNetDumpRes.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
-
-                        written = writer.ToString();
-                    }
-                }
-
-                Assert.NotEmpty(written);
-            }
-
-            if (OperatingSystem.IsWindows())
-            {
-                AnalyzeResult winDbgRes;
-                await using (var winDbg = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump).ConfigureAwait(false))
-                {
                     string written;
-                    await using (var diag = await DumpDiagnoser.CreateRemoteWinDbgAsync(winDbg.DbgEngDllPath, IPAddress.Loopback.ToString(), winDbg.LocalPort, TimeSpan.FromSeconds(30)).ConfigureAwait(false))
+                    await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT, progress).ConfigureAwait(false))
                     {
-                        winDbgRes = await diag.AnalyzeAsync().ConfigureAwait(false);
+                        dotNetDumpRes = await diag.AnalyzeAsync().ConfigureAwait(false);
 
                         using (var writer = new StringWriter())
                         {
-                            await winDbgRes.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+                            await dotNetDumpRes.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
 
                             written = writer.ToString();
                         }
                     }
 
                     Assert.NotEmpty(written);
+
+                    progressWriter.Flush();
+                    var progressText = progressWriter.ToString();
+
+                    Assert.NotEmpty(progressText);
+                }
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                // WinDbg, one proc
+                {
+                    AnalyzeResult winDbgRes;
+                    using (var progressWriter = new StringWriter())
+                    {
+                        var progress = new CommandLine.ProgressWrapper(false, progressWriter);
+
+                        await using (var winDbg = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump).ConfigureAwait(false))
+                        {
+                            Assert.True(NativeLibrary.TryLoad(winDbg.DbgEngDllPath, out var libHandle));
+                            Assert.True(DebugConnectWideThunk.TryCreate(libHandle, out var thunk, out _));
+
+                            Assert.True(RemoteWinDbgAddress.TryCreate(IPAddress.Loopback.ToString(), winDbg.LocalPort, out var addr, out _));
+
+                            string written;
+                            await using (var diag = await DumpDiagnoser.CreateRemoteWinDbgAsync(thunk, new[] { addr }, TimeSpan.FromSeconds(30), progress).ConfigureAwait(false))
+                            {
+                                winDbgRes = await diag.AnalyzeAsync().ConfigureAwait(false);
+
+                                using (var writer = new StringWriter())
+                                {
+                                    await winDbgRes.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+
+                                    written = writer.ToString();
+                                }
+                            }
+
+                            Assert.NotEmpty(written);
+
+                            progressWriter.Flush();
+                            var progressText = progressWriter.ToString();
+
+                            Assert.NotEmpty(progressText);
+                        }
+                    }
+
+                    CheckEquals(dotNetDumpRes, winDbgRes);
                 }
 
-                CheckEquals(dotNetDumpRes, winDbgRes);
+                // WinDbg, a lot of procs
+                {
+                    AnalyzeResult winDbgMultiRes;
+                    using (var progressWriter = new StringWriter())
+                    {
+                        var progress = new CommandLine.ProgressWrapper(false, progressWriter);
+
+                        await using (var winDbg1 = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump, chosenPort: 10_001).ConfigureAwait(false))
+                        await using (var winDbg2 = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump, chosenPort: 10_002).ConfigureAwait(false))
+                        await using (var winDbg3 = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump, chosenPort: 10_003).ConfigureAwait(false))
+                        await using (var winDbg4 = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump, chosenPort: 10_004).ConfigureAwait(false))
+                        await using (var winDbg5 = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump, chosenPort: 10_005).ConfigureAwait(false))
+                        await using (var winDbg6 = await WinDbgHelper.CreateWinDbgInstanceAsync(WinDbgHelper.WinDbgLocations.First(), dump, chosenPort: 10_006).ConfigureAwait(false))
+                        {
+                            Assert.True(NativeLibrary.TryLoad(winDbg1.DbgEngDllPath, out var libHandle));
+                            Assert.True(DebugConnectWideThunk.TryCreate(libHandle, out var thunk, out _));
+
+                            Assert.True(RemoteWinDbgAddress.TryCreate(IPAddress.Loopback.ToString(), winDbg1.LocalPort, out var addr1, out _));
+                            Assert.True(RemoteWinDbgAddress.TryCreate(IPAddress.Loopback.ToString(), winDbg2.LocalPort, out var addr2, out _));
+                            Assert.True(RemoteWinDbgAddress.TryCreate(IPAddress.Loopback.ToString(), winDbg3.LocalPort, out var addr3, out _));
+                            Assert.True(RemoteWinDbgAddress.TryCreate(IPAddress.Loopback.ToString(), winDbg4.LocalPort, out var addr4, out _));
+                            Assert.True(RemoteWinDbgAddress.TryCreate(IPAddress.Loopback.ToString(), winDbg5.LocalPort, out var addr5, out _));
+                            Assert.True(RemoteWinDbgAddress.TryCreate(IPAddress.Loopback.ToString(), winDbg6.LocalPort, out var addr6, out _));
+
+                            string written;
+                            await using (var diag = await DumpDiagnoser.CreateRemoteWinDbgAsync(thunk, new[] { addr1, addr2, addr3, addr4, addr5, addr6 }, TimeSpan.FromSeconds(30), progress).ConfigureAwait(false))
+                            {
+                                winDbgMultiRes = await diag.AnalyzeAsync().ConfigureAwait(false);
+
+                                using (var writer = new StringWriter())
+                                {
+                                    await winDbgMultiRes.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+
+                                    written = writer.ToString();
+                                }
+                            }
+
+                            Assert.NotEmpty(written);
+
+                            progressWriter.Flush();
+                            var progressText = progressWriter.ToString();
+
+                            Assert.NotEmpty(progressText);
+                        }
+                    }
+
+                    CheckEquals(dotNetDumpRes, winDbgMultiRes);
+                }
             }
 
             // check the results are the same
@@ -541,8 +619,8 @@ namespace DumpDiag.Tests
                 {
                     var count = Math.Max(x.Count(), y.Count());
 
-                    using(var xE = x.GetEnumerator())
-                    using(var yE = y.GetEnumerator())
+                    using (var xE = x.GetEnumerator())
+                    using (var yE = y.GetEnumerator())
                     {
                         var xRes = xE.MoveNext();
                         var yRes = yE.MoveNext();

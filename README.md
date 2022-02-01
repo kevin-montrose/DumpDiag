@@ -63,6 +63,8 @@ Options:
   -?, -h, --help                               Show help and usage information
 ```
 
+Note that you can specify multiple `--windbg-connection-string` arguments to split analysis between multiple remote sessions.  This allows similar scaling to `dotnet-dump`'s `--degree-parallelism` option.
+
 ## Remarks
 
 DumpDiag performs routine analysis of a dump of a .NET process using `dotnet-dump`:

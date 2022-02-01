@@ -22,16 +22,14 @@ namespace DumpDiag.CommandLine
 
         [SupportedOSPlatform("windows")]
         DbgEngDllPathNotSet = -13,
-        
+
         [SupportedOSPlatform("windows")]
         WindbgConnectionStringNotSet = -14,
         [SupportedOSPlatform("windows")]
-        WindbgConnectionStringMissingPort = -15,
+        WindbgConnectionStringBad = -15,
         [SupportedOSPlatform("windows")]
-        WindbgConnectionStringBadPort = -16,
+        DbgEngDllNotFound = -16,
         [SupportedOSPlatform("windows")]
-        WindbgConnectionStringBadIP = -17,
-        [SupportedOSPlatform("windows")]
-        DbgEngDllNotFound = -18,
+        DbgEngCouldNotBeLoaded = -17
     }
 }

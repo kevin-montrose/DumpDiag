@@ -9,7 +9,7 @@ namespace DumpDiag.Tests
 {
     public class LeaseTrackerTests
     {
-        private sealed class Node : IAsyncDisposable
+        private sealed class Node : IAsyncDisposable ,IHasCommandCount
         {
             private int activeReaders;
 
@@ -31,6 +31,8 @@ namespace DumpDiag.Tests
 
             private int _disposed;
             internal bool Disposed => Volatile.Read(ref _disposed) != 0;
+
+            public ulong TotalExecutedCommands { get; } = 0;
 
             internal Node(int v)
             {

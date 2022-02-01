@@ -90,7 +90,7 @@ namespace DumpDiag.Impl
         /// 
         /// note that count is written twice
         /// </summary>
-        internal static Command CreateCommandWithCountAndAdress(string command, int count, string infix, long addr)
+        internal static Command CreateCommandWithCountAndAddress(string command, int count, string infix, long addr)
         => new Command(Style.CountInfixCountAddress, command, count, infix, addr);
 
         /// <summary>

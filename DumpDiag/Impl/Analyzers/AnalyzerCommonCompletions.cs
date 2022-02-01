@@ -505,42 +505,30 @@ namespace DumpDiag.Impl
         {
             var ret = ImmutableHashSet.CreateBuilder<long>();
 
-            // first there are some headers and maybe warning messages, so some state to track that
             var fetching = false;
-
-            // eventually there's a summary, so we track some state to know to stop then
-            var doneFetching = false;
 
             await foreach (var line in commandRes.ConfigureAwait(false))
             {
-                using var lineRef = line;   // free the line after we parse it
-
-                if (doneFetching)
-                {
-                    // we're done, just need to fully enumerate and free everything
-                    continue;
-                }
+                using var lineRef = line;
 
                 var seq = lineRef.GetSequence();
-
-                if (!SequenceReaderHelper.TryParseHeapEntry(seq, false, out var entry, out var free))
+                if (fetching)
                 {
-                    if (fetching)
+                    if (SequenceReaderHelper.TryParseHeapStatLine(seq, out var mt, out var free))
                     {
-                        doneFetching = true;
-                        fetching = false;
+                        if (!free)
+                        {
+                            ret.Add(mt);
+                        }
                     }
-
-                    continue;
                 }
                 else
                 {
-                    fetching = true;
-                }
-
-                if (!free)
-                {
-                    ret.Add(entry.MethodTable);
+                    if (SequenceReaderHelper.IsHeapStatTableHeader(seq))
+                    {
+                        fetching = true;
+                        continue;
+                    }
                 }
             }
 

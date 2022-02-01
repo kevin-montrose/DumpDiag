@@ -7,6 +7,7 @@ using System;
 using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Runtime.Versioning;
+using System.Threading;
 
 namespace DumpDiag.Impl
 {
@@ -34,6 +35,8 @@ namespace DumpDiag.Impl
         private readonly IProgress<DumpDiagnoserProgress>? progress;
         private readonly int[] progressMax;
         private readonly int[] progressCurrent;
+        private readonly Timer progressTimer;
+        private long lastProgressCallback;
 
         private int threadCount;
         internal ImmutableDictionary<TypeDetails, ImmutableHashSet<long>>? typeDetails;
@@ -60,6 +63,20 @@ namespace DumpDiag.Impl
 
             progressMax = new int[Enum.GetValues(typeof(ProgressKind)).Length];
             progressCurrent = new int[progressMax.Length];
+
+            progressTimer = new Timer(RegularProgressCallback, null, Timeout.InfiniteTimeSpan, TimeSpan.FromMinutes(1));
+        }
+
+        private void RegularProgressCallback(object? _)
+        {
+            // try and make sure we always report progress at least once a minute
+            var lastProgress = Volatile.Read(ref lastProgressCallback);
+            var delta = Stopwatch.GetTimestamp() - lastProgress;
+
+            if (delta >= 60 * Stopwatch.Frequency)
+            {
+                ReportProgress();
+            }
         }
 
         private void SetProgressLimit(ProgressKind kind, int limit)
@@ -95,6 +112,10 @@ namespace DumpDiag.Impl
             {
                 lock (progressCurrent)
                 {
+                    Volatile.Write(ref lastProgressCallback, Stopwatch.GetTimestamp());
+
+                    prog = prog.WithTotalExecutedCommands(procs.TotalExecutedCommands);
+
                     prog = prog.WithCharacterArrays(CalcPercent(progressCurrent, progressMax, ProgressKind.CharacterArrays));
                     prog = prog.WithDelegateDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.DelegateDetails));
                     prog = prog.WithDeterminingDelegates(CalcPercent(progressCurrent, progressMax, ProgressKind.DeterminingDelegates));
@@ -106,7 +127,7 @@ namespace DumpDiag.Impl
                     prog = prog.WithTypeDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.TypeDetails));
                     prog = prog.WithAsyncDetails(CalcPercent(progressCurrent, progressMax, ProgressKind.AsyncDetails));
                     prog = prog.WithAnalysingPins(CalcPercent(progressCurrent, progressMax, ProgressKind.AnalyzingPins));
-                    prog = prog.WithAnalysingPins(CalcPercent(progressCurrent, progressMax, ProgressKind.HeapAssignments));
+                    prog = prog.WithHeapAssignments(CalcPercent(progressCurrent, progressMax, ProgressKind.HeapAssignments));
 
                     progress?.Report(prog);
                 }
@@ -237,9 +258,24 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var len = await proc.LoadStringLengthAsync(stringDetails, entry).ConfigureAwait(false);
-                var str = await proc.LoadCharsAsync(entry.Address + stringDetails.FirstCharOffset, len).ConfigureAwait(false);
+                // try and read this string whole thing in one call...
+                string str;
 
+                var peaked = await proc.PeakStringAsync(stringDetails, entry).ConfigureAwait(false);
+                if(peaked.ReadFullString)
+                {
+                    str = peaked.PeakedString;
+                }
+                else
+                {
+                    // ... but if we don't get it all, make a second call for the rest
+                    var startAddr = entry.Address + stringDetails.FirstCharOffset + peaked.PeakedString.Length * sizeof(char);
+                    var remainingLen = peaked.ActualLength - peaked.PeakedString.Length;
+                    var rest = await proc.LoadCharsAsync(startAddr, remainingLen).ConfigureAwait(false);
+
+                    str = peaked.PeakedString + rest;
+                }
+                
                 if (!builder.TryGetValue(str, out var curStats))
                 {
                     curStats = new ReferenceStats(0, 0, 0, 0);
@@ -264,8 +300,23 @@ namespace DumpDiag.Impl
                     continue;
                 }
 
-                var len = await proc.LoadStringLengthAsync(stringDetails, entry).ConfigureAwait(false);
-                var str = await proc.LoadCharsAsync(entry.Address + stringDetails.FirstCharOffset, len).ConfigureAwait(false);
+                // try and read this string whole thing in one call...
+                string str;
+
+                var peaked = await proc.PeakStringAsync(stringDetails, entry).ConfigureAwait(false);
+                if (peaked.ReadFullString)
+                {
+                    str = peaked.PeakedString;
+                }
+                else
+                {
+                    // ... but if we don't get it all, make a second call for the rest
+                    var startAddr = entry.Address + stringDetails.FirstCharOffset + peaked.PeakedString.Length * sizeof(char);
+                    var remainingLen = peaked.ActualLength - peaked.PeakedString.Length;
+                    var rest = await proc.LoadCharsAsync(startAddr, remainingLen).ConfigureAwait(false);
+
+                    str = peaked.PeakedString + rest;
+                }
 
                 if (!builder.TryGetValue(str, out var curStats))
                 {
@@ -1315,7 +1366,11 @@ namespace DumpDiag.Impl
         }
 
         public ValueTask DisposeAsync()
-        => procs.DisposeAsync();
+        {
+            progressTimer.Dispose();
+
+            return procs.DisposeAsync();
+        }
 
         private static ImmutableHashSet<long> DetermineMaximumRelevantTypeMethodTables(
             ImmutableDictionary<TypeDetails, ImmutableHashSet<long>> types,
@@ -1331,14 +1386,16 @@ namespace DumpDiag.Impl
             return dels.SelectMany(x => x.MethodTables).ToImmutableHashSet();
         }
 
-        internal async ValueTask StartAnalyzersAsync(Func<Task<TAnalyzer>> createDel)
+        internal async ValueTask StartAnalyzersAsync(Func<int, Task<TAnalyzer>> createDel)
         {
             SetProgressLimit(ProgressKind.StartingTasks, numProcs);
+
+            this.progressTimer.Change(TimeSpan.Zero, TimeSpan.FromMinutes(1));
 
             var procTasks = new Task<TAnalyzer>[numProcs];
             for (var i = 0; i < procTasks.Length; i++)
             {
-                procTasks[i] = createDel();
+                procTasks[i] = createDel(i);
             }
 
             var ready = await Task.WhenAll(procTasks).ConfigureAwait(false);
@@ -1575,7 +1632,7 @@ namespace DumpDiag.Impl
             Debug.Assert(processCount > 0);
 
             var ret = new DumpDiagnoser<DotNetDumpAnalyzerProcess>(processCount, progress);
-            await ret.StartAnalyzersAsync(() => StartAnalyzerProcessAsync(ret, dotnetDump, dumpPath)).ConfigureAwait(false);
+            await ret.StartAnalyzersAsync(_ => StartAnalyzerProcessAsync(ret, dotnetDump, dumpPath)).ConfigureAwait(false);
             await ret.LoadNeededStateAsync().ConfigureAwait(false);
 
             ret.SplitHeapByProcs();
@@ -1597,10 +1654,20 @@ namespace DumpDiag.Impl
         }
 
         [SupportedOSPlatform("windows")]
-        internal static async ValueTask<DumpDiagnoser<RemoteWinDbg>> CreateRemoteWinDbgAsync(string dbgEngDllPath, string ip, ushort port, TimeSpan timeout, IProgress<DumpDiagnoserProgress>? progress = null)
+        internal static async ValueTask<DumpDiagnoser<RemoteWinDbg>> CreateRemoteWinDbgAsync(DebugConnectWideThunk connectWideThunk, IEnumerable<RemoteWinDbgAddress> remoteAddresses, TimeSpan timeout, IProgress<DumpDiagnoserProgress>? progress = null)
         {
-            var ret = new DumpDiagnoser<RemoteWinDbg>(1, progress);
-            await ret.StartAnalyzersAsync(() => StartRemoteWinDbgAsync(ret, dbgEngDllPath, ip, port, timeout)).ConfigureAwait(false);
+            var remoteAsList = remoteAddresses.ToImmutableList();
+
+            var ret = new DumpDiagnoser<RemoteWinDbg>(remoteAsList.Count, progress);
+            await ret.StartAnalyzersAsync(
+                (index) =>
+                {
+                    var target = remoteAsList[index];
+
+                    return StartRemoteWinDbgAsync(ret, connectWideThunk, target, timeout);
+                }
+            )
+            .ConfigureAwait(false);
             await ret.LoadNeededStateAsync().ConfigureAwait(false);
 
             ret.SplitHeapByProcs();
@@ -1609,13 +1676,12 @@ namespace DumpDiag.Impl
 
             static async Task<RemoteWinDbg> StartRemoteWinDbgAsync(
                 DumpDiagnoser<RemoteWinDbg> self,
-                string dbgEngDllPath, 
-                string ip, 
-                ushort port, 
+                DebugConnectWideThunk connectWideThunk,
+                RemoteWinDbgAddress target,
                 TimeSpan timeout
             )
             {
-                var remote = await RemoteWinDbg.CreateAsync(ArrayPool<char>.Shared, dbgEngDllPath, ip, port, timeout).ConfigureAwait(false);
+                var remote = await RemoteWinDbg.CreateAsync(ArrayPool<char>.Shared, connectWideThunk, target.IPAddress, target.Port, timeout).ConfigureAwait(false);
 
                 self.MadeProgress(ProgressKind.StartingTasks, 1);
 

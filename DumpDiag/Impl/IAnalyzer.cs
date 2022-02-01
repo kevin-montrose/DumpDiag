@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 
 namespace DumpDiag.Impl
 {
-    internal interface IAnalyzer : IAsyncDisposable
+    internal interface IAnalyzer : IAsyncDisposable, IHasCommandCount
     {
         IAsyncEnumerable<HeapEntry> LoadHeapAsync(LoadHeapMode mode);
         ValueTask<StringDetails> LoadStringDetailsAsync(HeapEntry stringEntry);
@@ -25,5 +25,7 @@ namespace DumpDiag.Impl
         ValueTask<ImmutableList<HeapDetails>> LoadHeapDetailsAsync();
         ValueTask<ImmutableList<HeapGCHandle>> LoadGCHandlesAsync();
         ValueTask<HeapFragmentation> LoadHeapFragmentationAsync();
+
+        ValueTask<StringPeak> PeakStringAsync(StringDetails details, HeapEntry entry);
     }
 }

@@ -1,8 +1,6 @@
 ﻿using DbgEngWrapper;
 using Microsoft.Diagnostics.Runtime.Interop;
 using System;
-using System.Buffers;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
@@ -18,82 +16,6 @@ namespace DumpDiag.Impl
 {
     internal sealed class RemoteWinDbgStream : Stream, IDebugOutputCallbacksImp
     {
-        /// <summary>
-        /// Since we have to match the EXACT LIBRARY VERSION when using DbgEng.dll, 
-        /// we need to load libraries manually.
-        /// 
-        /// Yes, this stinks but it's the reality of it.
-        /// </summary>
-        internal readonly struct DebugConnectWideThunk // internal for testing purposes
-        {
-            internal IntPtr LibraryHandle { get; }
-            internal IntPtr DebugConnectWidePtr { get; }
-
-            private DebugConnectWideThunk(IntPtr lib, IntPtr func)
-            {
-                LibraryHandle = lib;
-                DebugConnectWidePtr = func;
-            }
-
-            internal unsafe WDebugClient CreateClient(string ip, ushort port)
-            {
-                var remoteOptions = $"tcp:server={ip},port={port}";
-                var remoteOptionsLPWStr = Marshal.StringToCoTaskMemUni(remoteOptions);
-                var debugClient6Guid = new Guid("e3acb9d7-7ec2-4f0c-a0da-e81e0cbbe628");
-                try
-                {
-                    var debugClient6GuidPtr = &debugClient6Guid;
-                    var debugClient6GuidIntPtr = (IntPtr)debugClient6GuidPtr;
-
-                    var debugConnectWideDel = (delegate* unmanaged<IntPtr, IntPtr, out IntPtr, int>)DebugConnectWidePtr;
-
-                    var hres = debugConnectWideDel(remoteOptionsLPWStr, debugClient6GuidIntPtr, out var debugClient);
-                    if (hres < 0)
-                    {
-                        Marshal.ThrowExceptionForHR(hres);
-                    }
-
-                    return new WDebugClient(debugClient);
-                }
-                finally
-                {
-                    Marshal.FreeCoTaskMem(remoteOptionsLPWStr);
-                }
-            }
-
-            internal static bool TryCreate(string dbgEngPath, out DebugConnectWideThunk thunk, [NotNullWhen(returnValue: false)] out string? error)
-            {
-                const string DEBUG_CONNECT_WIDE = "DebugConnectWide";
-
-                if (!File.Exists(dbgEngPath))
-                {
-                    thunk = default;
-                    error = $"Could not find file: {dbgEngPath}";
-                    return false;
-                }
-
-                if (!NativeLibrary.TryLoad(dbgEngPath, out var libraryHandle))
-                {
-                    thunk = default;
-                    error = $"Could not load library: {dbgEngPath}";
-                    return false;
-                }
-
-                if (!NativeLibrary.TryGetExport(libraryHandle, DEBUG_CONNECT_WIDE, out var debugConnectWidePtr))
-                {
-                    thunk = default;
-                    error = $"Could not load function '{DEBUG_CONNECT_WIDE}' from library: {dbgEngPath}";
-                    return false;
-                }
-
-                thunk = new DebugConnectWideThunk(libraryHandle, debugConnectWidePtr);
-                error = null;
-                return true;
-            }
-        }
-
-        private static readonly Dictionary<string, DebugConnectWideThunk> DbgEngLibraries = new Dictionary<string, DebugConnectWideThunk>();
-
         private readonly string uniqueString;
 
         private readonly DebugConnectWideThunk thunk;
@@ -558,28 +480,11 @@ namespace DumpDiag.Impl
         }
 
         [SupportedOSPlatform("windows")]
-        internal static async ValueTask<RemoteWinDbgStream> CreateAsync(string dbgEngPath, string ip, ushort port, TimeSpan startTimeout)
+        internal static async ValueTask<RemoteWinDbgStream> CreateAsync(DebugConnectWideThunk libraryHandle, string ip, ushort port, TimeSpan startTimeout)
         {
             if (!IPAddress.TryParse(ip, out _))
             {
                 throw new ArgumentException(nameof(ip));
-            }
-
-            // the library used matters, but we only want to load them once per process
-            // in practice we're pretty unlikely to double-load a library during normal operation
-            // but down the line... who knows
-            DebugConnectWideThunk libraryHandle;
-            lock (DbgEngLibraries)
-            {
-                if (!DbgEngLibraries.TryGetValue(dbgEngPath, out libraryHandle))
-                {
-                    if (!DebugConnectWideThunk.TryCreate(dbgEngPath, out var thunk, out var error))
-                    {
-                        throw new InvalidOperationException(error);
-                    }
-
-                    DbgEngLibraries[dbgEngPath] = libraryHandle = thunk;
-                }
             }
 
             var ret = new RemoteWinDbgStream(libraryHandle, ip, port, startTimeout);
