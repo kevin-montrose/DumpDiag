@@ -1,7 +1,7 @@
 ﻿using DbgEngWrapper;
 using System;
 using System.Diagnostics.CodeAnalysis;
-using System.IO;
+
 using System.Runtime.InteropServices;
 
 namespace DumpDiag.Impl
@@ -14,6 +14,9 @@ namespace DumpDiag.Impl
     /// </summary>
     internal readonly struct DebugConnectWideThunk // internal for testing purposes
     {
+        // only one caller at a time
+        private static readonly object SharedStartupLock = new object();
+
         internal IntPtr LibraryHandle { get; }
         internal IntPtr DebugConnectWidePtr { get; }
 
@@ -35,7 +38,13 @@ namespace DumpDiag.Impl
 
                 var debugConnectWideDel = (delegate* unmanaged<IntPtr, IntPtr, out IntPtr, int>)DebugConnectWidePtr;
 
-                var hres = debugConnectWideDel(remoteOptionsLPWStr, debugClient6GuidIntPtr, out var debugClient);
+                int hres;
+                IntPtr debugClient;
+                lock (SharedStartupLock)
+                {
+                    hres = debugConnectWideDel(remoteOptionsLPWStr, debugClient6GuidIntPtr, out debugClient);
+                }
+
                 if (hres < 0)
                 {
                     Marshal.ThrowExceptionForHR(hres);

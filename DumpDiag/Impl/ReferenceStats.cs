@@ -1,8 +1,9 @@
 ﻿using System;
+using System.Buffers;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct ReferenceStats : IEquatable<ReferenceStats>, IComparable<ReferenceStats>
+    internal readonly struct ReferenceStats : IEquatable<ReferenceStats>, IComparable<ReferenceStats>, IDiagnosisSerializable<ReferenceStats>
     {
         internal int Live { get; }
         internal long LiveBytes { get; }
@@ -47,6 +48,24 @@ namespace DumpDiag.Impl
             if (ret != 0) return ret;
 
             return 0;
+        }
+
+        public ReferenceStats Read(IBufferReader<byte> reader)
+        {
+            var l = default(IntWrapper).Read(reader).Value;
+            var lb = default(LongWrapper).Read(reader).Value;
+            var d = default(IntWrapper).Read(reader).Value;
+            var db = default(LongWrapper).Read(reader).Value;
+
+            return new ReferenceStats(l, lb, d, db);
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            new IntWrapper(Live).Write(writer);
+            new LongWrapper(LiveBytes).Write(writer);
+            new IntWrapper(Dead).Write(writer);
+            new LongWrapper(DeadBytes).Write(writer);
         }
     }
 }

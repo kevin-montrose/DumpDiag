@@ -1,9 +1,10 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Immutable;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct AsyncMachineBreakdown : IEquatable<AsyncMachineBreakdown>
+    internal readonly struct AsyncMachineBreakdown : IEquatable<AsyncMachineBreakdown>, IDiagnosisSerializable<AsyncMachineBreakdown>
     {
         internal TypeDetails Type { get; }
         internal int StateSizeBytes { get; }
@@ -55,6 +56,22 @@ namespace DumpDiag.Impl
             }
 
             return ret.ToHashCode();
+        }
+
+        public AsyncMachineBreakdown Read(IBufferReader<byte> reader)
+        {
+            var t = default(TypeDetails).Read(reader);
+            var ssb = default(IntWrapper).Read(reader).Value;
+            var smf = default(ImmutableListWrapper<InstanceFieldWithTypeDetails>).Read(reader).Value;
+
+            return new AsyncMachineBreakdown(t, ssb, smf);
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            Type.Write(writer);
+            new IntWrapper(StateSizeBytes).Write(writer);
+            new ImmutableListWrapper<InstanceFieldWithTypeDetails>(StateMachineFields).Write(writer);
         }
     }
 }

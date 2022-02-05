@@ -106,7 +106,7 @@ namespace DumpDiag.Tests
             GC.KeepAlive(client);
         }
 
-        [Theory(/*Timeout = 30_000*/)]
+        [Theory(Timeout = 30_000)]
         [InlineData(2)]
         [InlineData(4)]
         [InlineData(6)]

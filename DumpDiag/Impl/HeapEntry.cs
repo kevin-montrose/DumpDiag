@@ -1,8 +1,9 @@
 ﻿using System;
+using System.Buffers;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct HeapEntry : IEquatable<HeapEntry>
+    internal readonly struct HeapEntry : IEquatable<HeapEntry>, IDiagnosisSerializable<HeapEntry>
     {
         public long Address { get; }
         public long MethodTable { get; }
@@ -29,5 +30,23 @@ namespace DumpDiag.Impl
 
         public override int GetHashCode()
         => HashCode.Combine(Address, MethodTable, SizeBytes, Live, Dead);
+
+        public HeapEntry Read(IBufferReader<byte> reader)
+        {
+            var a = default(AddressWrapper).Read(reader).Value;
+            var m = default(AddressWrapper).Read(reader).Value;
+            var s = default(IntWrapper).Read(reader).Value;
+            var l = default(BoolWrapper).Read(reader).Value;
+
+            return new HeapEntry(a, m, s, l);
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            new AddressWrapper(Address).Write(writer);
+            new AddressWrapper(MethodTable).Write(writer);
+            new IntWrapper(SizeBytes).Write(writer);
+            new BoolWrapper(Live).Write(writer);
+        }
     }
 }

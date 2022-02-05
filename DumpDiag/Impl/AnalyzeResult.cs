@@ -190,7 +190,7 @@ namespace DumpDiag.Impl
                 static async ValueTask<bool> WriteSectionAsync(
                     TextWriter writer,
                     string sectionName,
-                    ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>> section,
+                    ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, PinAnalysis.CountSizePair>> section,
                     bool needsSpacer
                 )
                 {
@@ -287,7 +287,6 @@ namespace DumpDiag.Impl
 
                     if (machine.StateMachineFields.IsEmpty)
                     {
-                        // todo: this can probably be improved...
                         // as it is we're looking at the instances on the heap, but we could probably inspect more
                         // type information to figure out what fields are expected without an instance
                         await writer.WriteLineAsync(new string('-', nameWithSize.Length)).ConfigureAwait(false);

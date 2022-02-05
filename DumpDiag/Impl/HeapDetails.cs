@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
@@ -6,7 +7,7 @@ using System.Text;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct HeapDetails : IEquatable<HeapDetails>
+    internal readonly struct HeapDetails : IEquatable<HeapDetails>, IDiagnosisSerializable<HeapDetails>
     {
         internal enum HeapClassification
         {
@@ -201,6 +202,30 @@ namespace DumpDiag.Impl
             }
 
             return ret.ToHashCode();
+        }
+
+        public HeapDetails Read(IBufferReader<byte> reader)
+        {
+            var g0 = default(AddressWrapper).Read(reader).Value;
+            var g1 = default(AddressWrapper).Read(reader).Value;
+            var g2 = default(AddressWrapper).Read(reader).Value;
+            var h = default(IntWrapper).Read(reader).Value;
+            var l = default(ImmutableListWrapper<HeapDetailsBuilder.HeapSegment>).Read(reader).Value.ToImmutableArray();
+            var p = default(ImmutableListWrapper<HeapDetailsBuilder.HeapSegment>).Read(reader).Value.ToImmutableArray();
+            var s = default(ImmutableListWrapper<HeapDetailsBuilder.HeapSegment>).Read(reader).Value.ToImmutableArray();
+
+            return new HeapDetails(h, g0, g1, g2, s, l, p);
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            new AddressWrapper(this.gen0Start).Write(writer);
+            new AddressWrapper(this.gen1Start).Write(writer);
+            new AddressWrapper(this.gen2Start).Write(writer);
+            new IntWrapper(this.heapIndex).Write(writer);
+            new ImmutableListWrapper<HeapDetailsBuilder.HeapSegment>(this.loh.ToImmutableList()).Write(writer);
+            new ImmutableListWrapper<HeapDetailsBuilder.HeapSegment>(this.poh.ToImmutableList()).Write(writer);
+            new ImmutableListWrapper<HeapDetailsBuilder.HeapSegment>(this.soh.ToImmutableList()).Write(writer);
         }
     }
 }

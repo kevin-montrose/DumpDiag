@@ -1,16 +1,66 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Immutable;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct PinAnalysis : IEquatable<PinAnalysis>
+    internal readonly struct PinAnalysis : IEquatable<PinAnalysis>, IDiagnosisSerializable<PinAnalysis>
     {
-        internal ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>> Pins { get; }
-        internal ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>> AsyncPins { get; }
+        internal readonly struct CountSizePair : IEquatable<CountSizePair>, IDiagnosisSerializable<CountSizePair>
+        {
+            internal long Size { get; }
+            internal int Count { get; }
+
+            internal CountSizePair(long size, int count)
+            {
+                Size = size;
+                Count = count;
+            }
+
+            public override bool Equals(object? obj)
+            => obj is CountSizePair other && Equals(other);
+
+            public bool Equals(CountSizePair other)
+            => other.Size == Size && other.Count == Count;
+
+            public override int GetHashCode()
+            => HashCode.Combine(Size, Count);
+
+            public override string ToString()
+            => $"{nameof(Count)} = {Count}, {nameof(Size)} = {Size}";
+
+            public CountSizePair Read(IBufferReader<byte> reader)
+            {
+                var s = default(LongWrapper).Read(reader).Value;
+                var c = default(IntWrapper).Read(reader).Value;
+
+                return new CountSizePair(s, c);
+            }
+
+            public void Write(IBufferWriter<byte> writer)
+            {
+                new LongWrapper(Size).Write(writer);
+                new IntWrapper(Count).Write(writer);
+            }
+        }
+
+        internal ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, CountSizePair>> Pins { get; }
+        internal ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, CountSizePair>> AsyncPins { get; }
 
         internal PinAnalysis(
             ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>> pins,
             ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, (int Count, long Size)>> asyncPins
+        ) :
+            this(
+                pins.ToImmutableDictionary(kv => kv.Key, kv => kv.Value.ToImmutableDictionary(x => x.Key, x => new CountSizePair(x.Value.Size, x.Value.Count))),
+                asyncPins.ToImmutableDictionary(kv => kv.Key, kv => kv.Value.ToImmutableDictionary(x => x.Key, x => new CountSizePair(x.Value.Size, x.Value.Count)))
+            )
+        {
+        }
+
+        private PinAnalysis(
+            ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, CountSizePair>> pins,
+            ImmutableDictionary<HeapDetails.HeapClassification, ImmutableDictionary<TypeDetails, CountSizePair>> asyncPins
         )
         {
             Pins = pins;
@@ -97,5 +147,35 @@ namespace DumpDiag.Impl
 
         public override int GetHashCode()
         => HashCode.Combine(Pins.Count, AsyncPins.Count);   // other details aren't ordered, so can't include
+
+        public PinAnalysis Read(IBufferReader<byte> reader)
+        {
+            var p = default(ImmutableDictionaryWrapper<IntWrapper, ImmutableDictionaryWrapper<TypeDetails, CountSizePair>>).Read(reader).Value;
+            var a = default(ImmutableDictionaryWrapper<IntWrapper, ImmutableDictionaryWrapper<TypeDetails, CountSizePair>>).Read(reader).Value;
+
+            return
+                new PinAnalysis(
+                    p.ToImmutableDictionary(kv => (HeapDetails.HeapClassification)kv.Key.Value, kv => kv.Value.Value),
+                    a.ToImmutableDictionary(kv => (HeapDetails.HeapClassification)kv.Key.Value, kv => kv.Value.Value)
+                );
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            new ImmutableDictionaryWrapper<IntWrapper, ImmutableDictionaryWrapper<TypeDetails, CountSizePair>>(
+                Pins.ToImmutableDictionary(
+                    kv => new IntWrapper((int)kv.Key),
+                    kv => new ImmutableDictionaryWrapper<TypeDetails, CountSizePair>(kv.Value)
+                )
+            )
+            .Write(writer);
+            new ImmutableDictionaryWrapper<IntWrapper, ImmutableDictionaryWrapper<TypeDetails, CountSizePair>>(
+                AsyncPins.ToImmutableDictionary(
+                    kv => new IntWrapper((int)kv.Key),
+                    kv => new ImmutableDictionaryWrapper<TypeDetails, CountSizePair>(kv.Value)
+                )
+            )
+            .Write(writer);
+        }
     }
 }

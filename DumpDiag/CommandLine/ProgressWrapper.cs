@@ -21,7 +21,7 @@ namespace DumpDiag.CommandLine
         private bool asyncDetailsDone;
         private bool heapAssignmentDone;
         private bool pinsDone;
-        
+
         internal ProgressWrapper(bool quiet, TextWriter writer)
         {
             this.quiet = quiet;
@@ -35,29 +35,25 @@ namespace DumpDiag.CommandLine
                 return;
             }
 
+            writer.Write($"[{DateTime.UtcNow:u}] ");
             writer.Write($"executed commands {progress.TotalCommandsExecuted:N0}");
 
-            var hasWrittenOutput = true;
+            WriteProgress(writer, "starting", progress.PercentStartingTasks, ref startingDone);
+            WriteProgress(writer, "char[]s", progress.PercentCharacterArrays, ref charsDone);
+            WriteProgress(writer, "delegates stats", progress.PercentDelegateDetails, ref delegateStatsDone);
+            WriteProgress(writer, "finding delegates", progress.PercentDeterminingDelegates, ref delegateFindingDone);
+            WriteProgress(writer, "scanning heap", progress.PercentLoadHeap, ref heapScanDone);
+            WriteProgress(writer, "strings", progress.PercentStrings, ref stringsDone);
+            WriteProgress(writer, "thread count", progress.PercentThreadCount, ref threadCountDone);
+            WriteProgress(writer, "thread details", progress.PercentThreadDetails, ref threadDetailsDone);
+            WriteProgress(writer, "type details", progress.PercentTypeDetails, ref typeDetailsDone);
+            WriteProgress(writer, "async details", progress.PercentAsyncDetails, ref asyncDetailsDone);
+            WriteProgress(writer, "heap assignments", progress.PercentHeapAssignments, ref heapAssignmentDone);
+            WriteProgress(writer, "pins", progress.PercentAnalyzingPins, ref pinsDone);
 
-            WriteLine(writer, "starting", progress.PercentStartingTasks, ref hasWrittenOutput, ref startingDone);
-            WriteLine(writer, "char[]s", progress.PercentCharacterArrays, ref hasWrittenOutput, ref charsDone);
-            WriteLine(writer, "delegates stats", progress.PercentDelegateDetails, ref hasWrittenOutput, ref delegateStatsDone);
-            WriteLine(writer, "finding delegates", progress.PercentDeterminingDelegates, ref hasWrittenOutput, ref delegateFindingDone);
-            WriteLine(writer, "scanning heap", progress.PercentLoadHeap, ref hasWrittenOutput, ref heapScanDone);
-            WriteLine(writer, "strings", progress.PercentStrings, ref hasWrittenOutput, ref stringsDone);
-            WriteLine(writer, "thread count", progress.PercentThreadCount, ref hasWrittenOutput, ref threadCountDone);
-            WriteLine(writer, "thread details", progress.PercentThreadDetails, ref hasWrittenOutput, ref threadDetailsDone);
-            WriteLine(writer, "type details", progress.PercentTypeDetails, ref hasWrittenOutput, ref typeDetailsDone);
-            WriteLine(writer, "async details", progress.PercentAsyncDetails, ref hasWrittenOutput, ref asyncDetailsDone);
-            WriteLine(writer, "heap assignments", progress.PercentHeapAssignments, ref hasWrittenOutput, ref heapAssignmentDone);
-            WriteLine(writer, "pins", progress.PercentAnalyzingPins, ref hasWrittenOutput, ref pinsDone);
+            writer.WriteLine();
 
-            if (hasWrittenOutput)
-            {
-                writer.WriteLine();
-            }
-
-            static void WriteLine(TextWriter writer, string prefix, double percent, ref bool needsComma, ref bool done)
+            static void WriteProgress(TextWriter writer, string prefix, double percent, ref bool done)
             {
                 var isStarted = percent > 0;
                 var isOneHundred = percent >= 100;
@@ -71,22 +67,12 @@ namespace DumpDiag.CommandLine
                     return;
                 }
 
-                if (needsComma)
-                {
-                    writer.Write(", ");
-                }
-                else
-                {
-                    // first part needs the time
-                    writer.Write($"[{DateTime.UtcNow:u}]: ");
-                }
+                writer.Write(", ");
 
                 writer.Write(prefix);
                 writer.Write(": ");
                 writer.Write(percent);
                 writer.Write("%");
-
-                needsComma = true;
 
                 if (isOneHundred)
                 {

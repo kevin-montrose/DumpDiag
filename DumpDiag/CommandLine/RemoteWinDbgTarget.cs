@@ -20,8 +20,19 @@ namespace DumpDiag.CommandLine
         private readonly int minAsyncSize;
         private readonly int minCount;
         private readonly bool overwrite;
+        private readonly FileInfo? resumeFile;
 
-        internal RemoteWinDbgTarget(FileInfo dbgEngDllPath, IEnumerable<RemoteWinDbgAddress> remoteAddresses, int minAsyncSize, int minCount, bool overwrite, bool quiet, TextWriter resultWriter, FileInfo? saveReportTo)
+        internal RemoteWinDbgTarget(
+            FileInfo dbgEngDllPath, 
+            IEnumerable<RemoteWinDbgAddress> remoteAddresses, 
+            int minAsyncSize, 
+            int minCount, 
+            bool overwrite,
+            bool quiet, 
+            TextWriter resultWriter, 
+            FileInfo? saveReportTo,
+            FileInfo? resumeFile
+        )
         {
             this.dbgEngDllPath = dbgEngDllPath;
             this.remoteAddresses = remoteAddresses.ToImmutableList();
@@ -31,6 +42,7 @@ namespace DumpDiag.CommandLine
             this.minCount = minCount;
             this.overwrite = overwrite;
             this.quiet = quiet;
+            this.resumeFile = resumeFile;
         }
 
         internal async ValueTask<(ExitCodes Result, string? ErrorMessagE)> RunAsync()
@@ -56,8 +68,9 @@ namespace DumpDiag.CommandLine
             Report(resultWriter, $"DbgEng.dll location: {dbgEngDllPath.FullName}", quiet);
 
             var prog = new ProgressWrapper(quiet, resultWriter);
+            var storage = resumeFile != null ? new FileBackedDiagnosisStorage(resumeFile.Open(FileMode.OpenOrCreate)) : null;
 
-            await using var diag = await DumpDiagnoser.CreateRemoteWinDbgAsync(thunk, remoteAddresses, TimeSpan.FromSeconds(30), prog);
+            await using var diag = await DumpDiagnoser.CreateRemoteWinDbgAsync(thunk, remoteAddresses, TimeSpan.FromSeconds(30), prog, storage);
             var res = await diag.AnalyzeAsync().ConfigureAwait(false);
 
             Report(resultWriter, "Analyzing complete", quiet);

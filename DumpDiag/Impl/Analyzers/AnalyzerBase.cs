@@ -81,6 +81,8 @@ namespace DumpDiag.Impl
         private ulong totalExecutedCommands;
         ulong IHasCommandCount.TotalExecutedCommands => totalExecutedCommands;
 
+        protected ThreadAffinitizedObjectPool<StringBuilder> StringBuilders { get; }
+
         protected AnalyzerBase(Stream inputStream, Encoding inputEncoding, Stream outputStream, Encoding outputEncoding, string newLine, ArrayPool<char> arrayPool)
         {
             this.newLine = newLine;
@@ -103,6 +105,8 @@ namespace DumpDiag.Impl
 #endif
 
             totalExecutedCommands = 0;
+
+            StringBuilders = new ThreadAffinitizedObjectPool<StringBuilder>();
 
             disposed = false;
         }

@@ -1,8 +1,9 @@
 ﻿using System;
+using System.Buffers;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct AsyncStateMachineDetails : IEquatable<AsyncStateMachineDetails>
+    internal readonly struct AsyncStateMachineDetails : IEquatable<AsyncStateMachineDetails>, IDiagnosisSerializable<AsyncStateMachineDetails>
     {
         internal long Address { get; }
         internal long MethodTable { get; }
@@ -28,5 +29,23 @@ namespace DumpDiag.Impl
 
         public override int GetHashCode()
         => HashCode.Combine(Address, MethodTable, SizeBytes, Description);
+
+        public AsyncStateMachineDetails Read(IBufferReader<byte> reader)
+        {
+            var a = default(AddressWrapper).Read(reader).Value;
+            var m = default(AddressWrapper).Read(reader).Value;
+            var s = default(IntWrapper).Read(reader).Value;
+            var d = default(StringWrapper).Read(reader).Value;
+
+            return new AsyncStateMachineDetails(a, m, s, d);
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            new AddressWrapper(Address).Write(writer);
+            new AddressWrapper(MethodTable).Write(writer);
+            new IntWrapper(SizeBytes).Write(writer);
+            new StringWrapper(Description).Write(writer);
+        }
     }
 }

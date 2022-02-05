@@ -94,6 +94,14 @@ namespace DumpDiag
                 );
             command.AddOption(reportFileOption);
 
+            var resumeFileOption =
+                new Option<FileInfo?>(
+                    new[] { RESUMPTION_STATE_FILE_PATH_SHORT, RESUMPTION_STATE_FILE_PATH_LONG },
+                    getDefaultValue: () => null,
+                    description: "Store state to allow resumption of analysis to the given file"
+                );
+            command.Add(resumeFileOption);
+
             var minCountOption =
                 new Option<int>(
                     new[] { MIN_COUNT_SHORT, MIN_COUNT_LONG },
@@ -126,10 +134,10 @@ namespace DumpDiag
                 );
             command.AddOption(quietOption);
 
-            command.SetHandler<FileInfo?, FileInfo?, int?, int, FileInfo?, int, int, FileInfo?, bool, bool>(
-                static async (dotnetDumpPath, dumpFile, dumpProcessId, degreeParallelism, saveDumpFile, minCount, minAsyncSize, reportFile, overwrite, quiet) =>
+            command.SetHandler<FileInfo?, FileInfo?, int?, int, FileInfo?, int, int, FileInfo?, FileInfo?, bool, bool>(
+                static async (dotnetDumpPath, dumpFile, dumpProcessId, degreeParallelism, saveDumpFile, minCount, minAsyncSize, reportFile, resumeFile, overwrite, quiet) =>
                 {
-                    var target = CreateAndValidateDotNetDumpTarget(degreeParallelism, dotnetDumpPath, dumpFile, dumpProcessId, minCount, minAsyncSize, reportFile, saveDumpFile, overwrite, quiet);
+                    var target = CreateAndValidateDotNetDumpTarget(degreeParallelism, dotnetDumpPath, dumpFile, dumpProcessId, minCount, minAsyncSize, reportFile, resumeFile, saveDumpFile, overwrite, quiet);
                     var (code, error) = await target.RunAsync().ConfigureAwait(false);
 
                     if (code != ExitCodes.Success)
@@ -146,6 +154,7 @@ namespace DumpDiag
                 minCountOption,
                 minAsyncSizeOption,
                 reportFileOption,
+                resumeFileOption,
                 overwriteOption,
                 quietOption
             );
@@ -160,6 +169,7 @@ namespace DumpDiag
                 int minCount,
                 int minAsyncSize,
                 FileInfo? reportFile,
+                FileInfo? resumeFile,
                 FileInfo? saveDumpFile,
                 bool overwrite,
                 bool quiet
@@ -197,7 +207,8 @@ namespace DumpDiag
                         quiet,
                         Console.Out,
                         saveDumpFile,
-                        reportFile
+                        reportFile,
+                        resumeFile
                     );
             }
         }
@@ -242,6 +253,14 @@ namespace DumpDiag
                 );
             command.AddOption(reportFileOption);
 
+            var resumeFileOption =
+               new Option<FileInfo?>(
+                   new[] { RESUMPTION_STATE_FILE_PATH_SHORT, RESUMPTION_STATE_FILE_PATH_LONG },
+                   getDefaultValue: () => null,
+                   description: "Store state to allow resumption of analysis to the given file"
+               );
+            command.Add(resumeFileOption);
+
             var minCountOption =
                 new Option<int>(
                     new[] { MIN_COUNT_SHORT, MIN_COUNT_LONG },
@@ -274,10 +293,10 @@ namespace DumpDiag
                 );
             command.AddOption(quietOption);
 
-           command.SetHandler<string[]?, FileInfo?, FileInfo?, int, int, bool, bool>(
-                static async (connectionStrings, dbgEngPath, reportFile, minCount, minAsync, overwrite, quiet) =>
+           command.SetHandler<string[]?, FileInfo?, int, int, bool, bool, FileInfo?, FileInfo?>(
+                static async (connectionStrings, dbgEngPath, minCount, minAsync, overwrite, quiet, reportFile, resumeFile) =>
                 {
-                    var target = CreateAndValidateRemoteWinDbg(connectionStrings, dbgEngPath, minAsync, minCount, reportFile, overwrite, quiet);
+                    var target = CreateAndValidateRemoteWinDbg(connectionStrings, dbgEngPath, minAsync, minCount, reportFile, resumeFile, overwrite, quiet);
                     var (code, error) = await target.RunAsync().ConfigureAwait(false);
 
                     if (code != ExitCodes.Success)
@@ -286,7 +305,7 @@ namespace DumpDiag
                         Exit(code);
                     }
                 },
-                connectionStringOptions, dbgEngDllOption, reportFileOption, minCountOption, minAsyncSizeOption, overwriteOption, quietOption
+                connectionStringOptions, dbgEngDllOption,minCountOption, minAsyncSizeOption, overwriteOption, quietOption, reportFileOption, resumeFileOption
             );
 
             return command;
@@ -297,6 +316,7 @@ namespace DumpDiag
                 int minAsyncSize,
                 int minCount,
                 FileInfo? reportFile,
+                FileInfo? resumeFile,
                 bool overwrite,
                 bool quiet
             )
@@ -339,7 +359,7 @@ namespace DumpDiag
 
                 CommonChecks(minAsyncSize, minCount);
 
-                return new RemoteWinDbgTarget(dbgEngPath, connectionStringsParsed, minAsyncSize, minCount, overwrite, quiet, Console.Out, reportFile);
+                return new RemoteWinDbgTarget(dbgEngPath, connectionStringsParsed, minAsyncSize, minCount, overwrite, quiet, Console.Out, reportFile, resumeFile);
             }
         }
 

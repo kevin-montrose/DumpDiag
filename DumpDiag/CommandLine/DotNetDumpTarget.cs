@@ -19,6 +19,7 @@ namespace DumpDiag.CommandLine
         private readonly FileInfo? dotNetDump;
         private readonly FileInfo? saveDumpTo;
         private readonly FileInfo? saveReportTo;
+        private readonly FileInfo? resumeFile;
 
         internal DotNetDumpTarget(
             int degreeParallelism,
@@ -31,7 +32,8 @@ namespace DumpDiag.CommandLine
             bool quiet,
             TextWriter resultWriter,
             FileInfo? saveDumpTo,
-            FileInfo? saveReportTo
+            FileInfo? saveReportTo,
+            FileInfo? resumeFile
         )
         {
             this.dumpFile = dumpFile;
@@ -45,6 +47,7 @@ namespace DumpDiag.CommandLine
             this.dotNetDump = dotNetDump;
             this.saveReportTo = saveReportTo;
             this.saveDumpTo = saveDumpTo;
+            this.resumeFile = resumeFile;
         }
 
         internal async ValueTask<(ExitCodes Result, string? ErrorMessage)> RunAsync()
@@ -146,8 +149,9 @@ namespace DumpDiag.CommandLine
             try
             {
                 var prog = new ProgressWrapper(quiet, resultWriter);
+                var storage = resumeFile != null ? new FileBackedDiagnosisStorage(resumeFile.Open(FileMode.OpenOrCreate)) : null;
 
-                await using var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dotnetDumpPath, dumpFilePath, degreeParallelism, prog).ConfigureAwait(false);
+                await using var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dotnetDumpPath, dumpFilePath, degreeParallelism, prog, storage).ConfigureAwait(false);
                 var res = await diag.AnalyzeAsync().ConfigureAwait(false);
 
                 Report(resultWriter, "Analyzing complete", quiet);

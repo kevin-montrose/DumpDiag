@@ -255,7 +255,7 @@ namespace DumpDiag.Impl
                             cur.AddSegment(beginAddr, allocatedSize);
                             continue;
                         }
-                        else if(SequenceReaderHelper.TryParseHeapSegment(seq, out beginAddr, out allocatedSize))
+                        else if (SequenceReaderHelper.TryParseHeapSegment(seq, out beginAddr, out allocatedSize))
                         {
                             cur.AddSegment(beginAddr, allocatedSize);
                             continue;
@@ -389,8 +389,7 @@ namespace DumpDiag.Impl
 
                         if (peakedString.Length != length)
                         {
-                            // todo: don't love this
-                            builder = new StringBuilder(length);
+                            builder = self.StringBuilders.Obtain();
                             builder.Append(peakedString);
 
                             remainingLength = length - peakedString.Length;
@@ -408,7 +407,17 @@ namespace DumpDiag.Impl
                     }
                 }
 
-                var toRetString = builder?.ToString() ?? peakedString;
+                string? toRetString;
+                if (builder != null)
+                {
+                    toRetString = builder.ToString();
+                    builder.Clear();
+                    self.StringBuilders.Return(builder);
+                }
+                else
+                {
+                    toRetString = peakedString;
+                }
 
                 if (toRetString == null)
                 {

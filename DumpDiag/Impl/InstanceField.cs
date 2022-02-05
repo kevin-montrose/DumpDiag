@@ -1,8 +1,9 @@
 ﻿using System;
+using System.Buffers;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct InstanceField : IEquatable<InstanceField>
+    internal readonly struct InstanceField : IEquatable<InstanceField>, IDiagnosisSerializable<InstanceField>
     {
         internal string Name { get; }
         internal long MethodTable { get; }
@@ -24,46 +25,19 @@ namespace DumpDiag.Impl
 
         public override int GetHashCode()
         => HashCode.Combine(Name, MethodTable);
-    }
 
-    // todo: move this elsewhere
-    internal readonly struct InstanceFieldWithValue : IEquatable<InstanceFieldWithValue>
-    {
-        internal InstanceField InstanceField { get; }
-        internal long Value { get; }
-
-        internal InstanceFieldWithValue(InstanceField field, long val)
+        public InstanceField Read(IBufferReader<byte> reader)
         {
-            InstanceField = field;
-            Value = val;
+            var n = default(StringWrapper).Read(reader).Value;
+            var mt = default(AddressWrapper).Read(reader).Value;
+
+            return new InstanceField(n, mt);
         }
 
-        public override string ToString()
-        => $"{InstanceField} {Value:X2}";
-
-        public bool Equals(InstanceFieldWithValue other)
-        => other.Value == Value && other.InstanceField.Equals(InstanceField);
-
-        public override bool Equals(object? obj)
-        => obj is InstanceFieldWithValue other && Equals(other);
-
-        public override int GetHashCode()
-        => HashCode.Combine(InstanceField, Value);
-    }
-
-    // todo: move this elsewhere
-    internal readonly struct InstanceFieldWithTypeDetails
-    {
-        internal TypeDetails TypeDetails { get; }
-        internal InstanceField InstanceField { get; }
-
-        internal InstanceFieldWithTypeDetails(TypeDetails type, InstanceField instanceField)
+        public void Write(IBufferWriter<byte> writer)
         {
-            TypeDetails = type;
-            InstanceField = instanceField;
+            new StringWrapper(Name).Write(writer);
+            new AddressWrapper(MethodTable).Write(writer);
         }
-
-        public override string ToString()
-        => $"{TypeDetails} {InstanceField}";
     }
 }

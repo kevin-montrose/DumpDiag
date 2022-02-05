@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Immutable;
 using System.Diagnostics;
 
@@ -6,7 +7,7 @@ namespace DumpDiag.Impl
 {
     internal struct HeapDetailsBuilder
     {
-        internal readonly struct HeapSegment : IEquatable<HeapSegment>
+        internal readonly struct HeapSegment : IEquatable<HeapSegment>, IDiagnosisSerializable<HeapSegment>
         {
             internal long LowAddress { get; }
             internal long SizeBytes { get; }
@@ -18,7 +19,7 @@ namespace DumpDiag.Impl
 
                 LowAddress = startAddr - size;
                 SizeBytes = size;
-                HighAddress = LowAddress + size;
+                HighAddress = startAddr;
             }
 
             public override string ToString()
@@ -33,6 +34,20 @@ namespace DumpDiag.Impl
 
             public override int GetHashCode()
             => HashCode.Combine(LowAddress, SizeBytes);
+
+            public HeapSegment Read(IBufferReader<byte> reader)
+            {
+                var h = default(AddressWrapper).Read(reader).Value;
+                var s = default(LongWrapper).Read(reader).Value;
+
+                return new HeapSegment(h, s);
+            }
+
+            public void Write(IBufferWriter<byte> writer)
+            {
+                new AddressWrapper(HighAddress).Write(writer);
+                new LongWrapper(SizeBytes).Write(writer);
+            }
         }
 
         private long? gen0Start;

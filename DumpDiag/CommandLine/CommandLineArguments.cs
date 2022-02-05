@@ -37,5 +37,8 @@
 
         internal const string DBGENG_DLL_PATH_SHORT = "-dedp";
         internal const string DBGENG_DLL_PATH_LONG = "--dbgeng-dll-path";
+
+        internal const string RESUMPTION_STATE_FILE_PATH_SHORT = "-rsfp";
+        internal const string RESUMPTION_STATE_FILE_PATH_LONG = "--resumption-state-file-path";
     }
 }

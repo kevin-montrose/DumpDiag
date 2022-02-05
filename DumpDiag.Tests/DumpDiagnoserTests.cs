@@ -25,7 +25,7 @@ namespace DumpDiag.Tests
             ImmutableDictionary<string, ReferenceStats> res;
             await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                res = await diag.LoadStringCountsAsync().ConfigureAwait(false);
+                res = (await diag.LoadStringCountsAsync().ConfigureAwait(false)).Value.ToImmutableDictionary(kv => kv.Key.Value, kv => kv.Value);
             }
 
             Assert.NotEmpty(res);
@@ -39,7 +39,7 @@ namespace DumpDiag.Tests
             ImmutableDictionary<string, ReferenceStats> res;
             await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                res = await diag.LoadDelegateCountsAsync().ConfigureAwait(false);
+                res = (await diag.LoadDelegateCountsAsync().ConfigureAwait(false)).Value.ToImmutableDictionary(kv => kv.Key.Value, kv => kv.Value);
             }
 
             Assert.NotEmpty(res);
@@ -55,7 +55,7 @@ namespace DumpDiag.Tests
             ImmutableDictionary<string, ReferenceStats> res;
             await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                res = await diag.LoadCharacterArrayCountsAsync().ConfigureAwait(false);
+                res = (await diag.LoadCharacterArrayCountsAsync().ConfigureAwait(false)).Value.ToImmutableDictionary(kv => kv.Key.Value, kv => kv.Value);
             }
 
             Assert.NotEmpty(res);
@@ -92,7 +92,7 @@ namespace DumpDiag.Tests
             ImmutableList<AsyncMachineBreakdown> res;
             await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT).ConfigureAwait(false))
             {
-                res = await diag.GetAsyncMachineBreakdownsAsync().ConfigureAwait(false);
+                res = (await diag.GetAsyncMachineBreakdownsAsync().ConfigureAwait(false)).Value;
             }
 
             Assert.NotEmpty(res);
@@ -258,7 +258,7 @@ namespace DumpDiag.Tests
         }
 
         private sealed class _Big<A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z> { }
-        // todo: gigantic!
+
         private sealed class _Nested<A> { internal sealed class _Inner<B> { } }
 
         [Fact]
@@ -592,51 +592,155 @@ namespace DumpDiag.Tests
                     CheckEquals(dotNetDumpRes, winDbgMultiRes);
                 }
             }
+        }
 
-            // check the results are the same
-            static void CheckEquals(AnalyzeResult a, AnalyzeResult b)
+
+
+        // check the results are the same
+        static void CheckEquals(AnalyzeResult a, AnalyzeResult b)
+        {
+            CheckEqualsSequential(a.AsyncStateMachineBreakdown.OrderBy(static x => x.Type).AsEnumerable(), b.AsyncStateMachineBreakdown.OrderBy(static x => x.Type).AsEnumerable());
+
+            CheckEqualsSequential(a.AsyncStateMatchineStats.OrderBy(static x => (x.Key, x.Value)), b.AsyncStateMatchineStats.OrderBy(static x => (x.Key, x.Value)));
+
+            CheckEqualsSequential(a.CharacterArrayReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.CharacterArrayReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+            CheckEqualsSequential(a.DelegateReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.DelegateReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+            Assert.Equal(a.HeapFragmentation, b.HeapFragmentation);
+
+            Assert.Equal(a.PinAnalysis, b.PinAnalysis);
+
+            CheckEqualsSequential(a.StringReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.StringReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+            Assert.Equal(a.ThreadDetails, b.ThreadDetails);
+
+            CheckEqualsSequential(a.TypeReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.TypeReferenceStats.OrderBy(static x => (x.Key, x.Value)));
+
+            // go item by item so we get better errors
+            static void CheckEqualsSequential<T>(IEnumerable<T> x, IEnumerable<T> y)
             {
-                CheckEqualsSequential(a.AsyncStateMachineBreakdown.OrderBy(static x => x.Type).AsEnumerable(), b.AsyncStateMachineBreakdown.OrderBy(static x => x.Type).AsEnumerable());
+                var count = Math.Max(x.Count(), y.Count());
 
-                CheckEqualsSequential(a.AsyncStateMatchineStats.OrderBy(static x => (x.Key, x.Value)), b.AsyncStateMatchineStats.OrderBy(static x => (x.Key, x.Value)));
-
-                CheckEqualsSequential(a.CharacterArrayReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.CharacterArrayReferenceStats.OrderBy(static x => (x.Key, x.Value)));
-
-                CheckEqualsSequential(a.DelegateReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.DelegateReferenceStats.OrderBy(static x => (x.Key, x.Value)));
-
-                Assert.Equal(a.HeapFragmentation, b.HeapFragmentation);
-
-                Assert.Equal(a.PinAnalysis, b.PinAnalysis);
-
-                CheckEqualsSequential(a.StringReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.StringReferenceStats.OrderBy(static x => (x.Key, x.Value)));
-
-                Assert.Equal(a.ThreadDetails, b.ThreadDetails);
-
-                CheckEqualsSequential(a.TypeReferenceStats.OrderBy(static x => (x.Key, x.Value)), b.TypeReferenceStats.OrderBy(static x => (x.Key, x.Value)));
-
-                // go item by item so we get better errors
-                static void CheckEqualsSequential<T>(IEnumerable<T> x, IEnumerable<T> y)
+                using (var xE = x.GetEnumerator())
+                using (var yE = y.GetEnumerator())
                 {
-                    var count = Math.Max(x.Count(), y.Count());
+                    var xRes = xE.MoveNext();
+                    var yRes = yE.MoveNext();
 
-                    using (var xE = x.GetEnumerator())
-                    using (var yE = y.GetEnumerator())
+                    Assert.Equal(xRes, yRes);
+
+                    if (!xRes)
                     {
-                        var xRes = xE.MoveNext();
-                        var yRes = yE.MoveNext();
-
-                        Assert.Equal(xRes, yRes);
-
-                        if (!xRes)
-                        {
-                            return;
-                        }
-
-                        Assert.Equal(xE.Current, yE.Current);
+                        return;
                     }
+
+                    Assert.Equal(xE.Current, yE.Current);
+                }
+            }
+        }
+
+        private sealed class _ResumableAsync: IResumableDiagnosisStorage
+        {
+            private readonly IResumableDiagnosisStorage inner;
+
+            internal _ResumableAsync(IResumableDiagnosisStorage inner)
+            {
+                this.inner = inner;
+            }
+
+            public ValueTask DisposeAsync()
+            => inner.DisposeAsync();
+
+            public ValueTask IntializeWithVersionAsync(Version thisVersion)
+            => inner.IntializeWithVersionAsync(thisVersion);
+
+            public async ValueTask<(bool HasData, T Data)> LoadDataAsync<T>(string name) where T : struct, IDiagnosisSerializable<T>
+            {
+                var res = await inner.LoadDataAsync<T>(name).ConfigureAwait(false);
+                Assert.True(res.HasData);
+
+                return res;
+            }
+
+            public ValueTask StoreDataAsync<T>(string name, T data) where T : struct, IDiagnosisSerializable<T>
+            => throw new Exception("No new data should be stored");
+        }
+
+
+        [Fact]
+        public async Task ResumableAsync()
+        {
+            await using var dump = await SelfDumpHelper.TakeSelfDumpAsync().ConfigureAwait(false);
+
+            var resumeFile = Path.GetTempFileName();
+
+            AnalyzeResult firstRun;
+            {
+                File.Delete(resumeFile);
+                await using var resumeStorage = await FileBackedDiagnosisStorage.CreateAsync(new FileInfo(resumeFile)).ConfigureAwait(false);
+
+                using (var progressWriter = new StringWriter())
+                {
+                    var progress = new CommandLine.ProgressWrapper(false, progressWriter);
+
+                    string written;
+                    await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT, progress, resumeStorage).ConfigureAwait(false))
+                    {
+                        firstRun = await diag.AnalyzeAsync().ConfigureAwait(false);
+
+                        using (var writer = new StringWriter())
+                        {
+                            await firstRun.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+
+                            written = writer.ToString();
+                        }
+                    }
+
+                    Assert.NotEmpty(written);
+
+                    progressWriter.Flush();
+                    var progressText = progressWriter.ToString();
+
+                    Assert.NotEmpty(progressText);
+                }
+
+                Assert.True(File.Exists(resumeFile));
+            }
+
+            AnalyzeResult secondRun;
+            {
+                var innerStorage = await FileBackedDiagnosisStorage.CreateAsync(new FileInfo(resumeFile)).ConfigureAwait(false);
+
+                await using var resumeStorage = new _ResumableAsync(innerStorage);
+
+                using (var progressWriter = new StringWriter())
+                {
+                    var progress = new CommandLine.ProgressWrapper(false, progressWriter);
+
+                    string written;
+                    await using (var diag = await DumpDiagnoser.CreateDotNetDumpAsync(dump.DotNetDumpPath, dump.DumpFile, PROCESS_COUNT, progress, resumeStorage).ConfigureAwait(false))
+                    {
+                        secondRun = await diag.AnalyzeAsync().ConfigureAwait(false);
+
+                        using (var writer = new StringWriter())
+                        {
+                            await firstRun.WriteToAsync(writer, 1, 1).ConfigureAwait(false);
+
+                            written = writer.ToString();
+                        }
+                    }
+
+                    Assert.NotEmpty(written);
+
+                    progressWriter.Flush();
+                    var progressText = progressWriter.ToString();
+
+                    Assert.NotEmpty(progressText);
                 }
             }
 
+            CheckEquals(firstRun, secondRun);
         }
     }
 }

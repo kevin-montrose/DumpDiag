@@ -1,8 +1,9 @@
 ﻿using System;
+using System.Buffers;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct TypeDetails : IEquatable<TypeDetails>, IComparable<TypeDetails>
+    internal readonly struct TypeDetails : IEquatable<TypeDetails>, IComparable<TypeDetails>, IDiagnosisSerializable<TypeDetails>
     {
         internal string TypeName { get; }
         internal long MethodTable { get; }
@@ -27,5 +28,19 @@ namespace DumpDiag.Impl
 
         public int CompareTo(TypeDetails other)
         => other.MethodTable.CompareTo(MethodTable);
+
+        public TypeDetails Read(IBufferReader<byte> reader)
+        {
+            var mt = default(AddressWrapper).Read(reader).Value;
+            var tn = default(StringWrapper).Read(reader).Value;
+
+            return new TypeDetails(tn, mt);
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            new AddressWrapper(MethodTable).Write(writer);
+            new StringWrapper(TypeName).Write(writer);
+        }
     }
 }

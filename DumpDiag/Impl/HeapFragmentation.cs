@@ -1,8 +1,9 @@
 ﻿using System;
+using System.Buffers;
 
 namespace DumpDiag.Impl
 {
-    internal readonly struct HeapFragmentation : IEquatable<HeapFragmentation>
+    internal readonly struct HeapFragmentation : IEquatable<HeapFragmentation>, IDiagnosisSerializable<HeapFragmentation>
     {
         internal long Gen0Size { get; }
         internal long Gen0Free { get; }
@@ -93,5 +94,43 @@ namespace DumpDiag.Impl
                     POHSize
                 )
            );
+
+        public HeapFragmentation Read(IBufferReader<byte> reader)
+        {
+            var g0f = default(LongWrapper).Read(reader).Value;
+            var g0s = default(LongWrapper).Read(reader).Value;
+
+            var g1f = default(LongWrapper).Read(reader).Value;
+            var g1s = default(LongWrapper).Read(reader).Value;
+
+            var g2f = default(LongWrapper).Read(reader).Value;
+            var g2s = default(LongWrapper).Read(reader).Value;
+
+            var lf = default(LongWrapper).Read(reader).Value;
+            var ls = default(LongWrapper).Read(reader).Value;
+
+            var pf = default(LongWrapper).Read(reader).Value;
+            var ps = default(LongWrapper).Read(reader).Value;
+
+            return new HeapFragmentation(g0f, g0s, g1f, g1s, g2f, g2s, lf, ls, pf, ps);
+        }
+
+        public void Write(IBufferWriter<byte> writer)
+        {
+            new LongWrapper(Gen0Free).Write(writer);
+            new LongWrapper(Gen0Size).Write(writer);
+
+            new LongWrapper(Gen1Free).Write(writer);
+            new LongWrapper(Gen1Size).Write(writer);
+
+            new LongWrapper(Gen2Free).Write(writer);
+            new LongWrapper(Gen2Size).Write(writer);
+
+            new LongWrapper(LOHFree).Write(writer);
+            new LongWrapper(LOHSize).Write(writer);
+
+            new LongWrapper(POHFree).Write(writer);
+            new LongWrapper(POHSize).Write(writer);
+        }
     }
 }
